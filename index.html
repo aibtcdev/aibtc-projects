@@ -1113,7 +1113,7 @@ function ghLabel(url) {
 function renderGhBadge(item) {
   if (!item.githubUrl) return '\u2014';
   const gd = item.githubData;
-  if (!gd) return `<a class="gh-badge repo-active" href="${esc(item.githubUrl)}" target="_blank" rel="noopener">${ICONS.repo} <span class="gh-badge-text">${esc(ghLabel(item.githubUrl))}</span></a>`;
+  if (!gd || !gd.type) return `<a class="gh-badge repo-active" href="${esc(item.githubUrl)}" target="_blank" rel="noopener">${ICONS.repo} <span class="gh-badge-text">${esc(ghLabel(item.githubUrl))}</span></a>`;
   let cls, icon, label;
   if (gd.type === 'repo') {
     icon = ICONS.repo;
