@@ -27,53 +27,60 @@ function parseGithubUrl(url) {
   return null;
 }
 
-async function fetchGithubData(url) {
-  const parsed = parseGithubUrl(url);
-  if (!parsed) return null;
+async function fetchGithubData(url, env) {
+  try {
+    const parsed = parseGithubUrl(url);
+    if (!parsed) return null;
 
-  let endpoint;
-  if (parsed.type === 'repo') {
-    endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`;
-  } else if (parsed.type === 'pr') {
-    endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`;
-  } else {
-    endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}`;
-  }
+    let endpoint;
+    if (parsed.type === 'repo') {
+      endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`;
+    } else if (parsed.type === 'pr') {
+      endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`;
+    } else {
+      endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}`;
+    }
 
-  const res = await fetch(endpoint, {
-    headers: {
-      'User-Agent': 'aibtc-roadmap',
-      Accept: 'application/vnd.github.v3+json',
-    },
-  });
-  if (!res.ok) return null;
+    const headers = {
+      'User-Agent': 'aibtc-roadmap/1.0',
+      Accept: 'application/vnd.github+json',
+    };
+    // Use GitHub token if available (avoids 403 from shared Cloudflare IPs)
+    const token = env?.GITHUB_TOKEN;
+    if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const d = await res.json();
+    const res = await fetch(endpoint, { headers });
+    if (!res.ok) return null;
 
-  if (parsed.type === 'repo') {
+    const d = await res.json();
+
+    if (parsed.type === 'repo') {
+      return {
+        type: 'repo',
+        number: null,
+        title: d.description || d.full_name,
+        state: d.archived ? 'archived' : 'active',
+        merged: false,
+        assignees: [],
+        labels: d.topics || [],
+        stars: d.stargazers_count,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
     return {
-      type: 'repo',
-      number: null,
-      title: d.description || d.full_name,
-      state: d.archived ? 'archived' : 'active',
-      merged: false,
-      assignees: [],
-      labels: d.topics || [],
-      stars: d.stargazers_count,
+      type: parsed.type,
+      number: parsed.number,
+      title: d.title,
+      state: d.state,
+      merged: d.merged || false,
+      assignees: (d.assignees || []).map(a => a.login),
+      labels: (d.labels || []).map(l => l.name),
       fetchedAt: new Date().toISOString(),
     };
+  } catch {
+    return null;
   }
-
-  return {
-    type: parsed.type,
-    number: parsed.number,
-    title: d.title,
-    state: d.state,
-    merged: d.merged || false,
-    assignees: (d.assignees || []).map(a => a.login),
-    labels: (d.labels || []).map(l => l.name),
-    fetchedAt: new Date().toISOString(),
-  };
 }
 
 // Add agent to contributors list if not already present
@@ -94,9 +101,44 @@ export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: corsHeaders() });
 }
 
+// Refresh stale GitHub data in the background
+const STALE_AFTER_MS = 60 * 60 * 1000; // 1 hour
+
+async function refreshStaleGithubData(env) {
+  const data = await getData(env);
+  const now = Date.now();
+  let changed = false;
+
+  for (const item of data.items) {
+    if (!item.githubUrl) continue;
+    const fetchedAt = item.githubData?.fetchedAt ? new Date(item.githubData.fetchedAt).getTime() : 0;
+    if (now - fetchedAt < STALE_AFTER_MS) continue;
+
+    const fresh = await fetchGithubData(item.githubUrl, env);
+    if (!fresh) continue;
+
+    // Auto-update status based on GitHub state
+    if (item.status !== 'done') {
+      const closed = fresh.state === 'closed' || fresh.state === 'archived';
+      const merged = fresh.merged === true;
+      if (closed || merged) item.status = 'done';
+    }
+
+    item.githubData = fresh;
+    item.updatedAt = new Date().toISOString();
+    changed = true;
+  }
+
+  if (changed) await saveData(env, data);
+}
+
 // GET - list all items (public, no auth)
 export async function onRequestGet(context) {
   const data = await getData(context.env);
+
+  // Kick off background refresh for stale GitHub data
+  context.waitUntil(refreshStaleGithubData(context.env));
+
   return jsonResponse(data, 200, corsHeaders());
 }
 
@@ -119,11 +161,13 @@ export async function onRequestPost(context) {
     return jsonResponse({ error: 'githubUrl must be a valid GitHub URL (issue, PR, or repo).' }, 400, corsHeaders());
   }
 
-  // Verify the GitHub URL actually exists
-  const ghData = await fetchGithubData(ghUrl);
-  if (!ghData) {
-    return jsonResponse({ error: 'GitHub URL not found. Make sure the repo, issue, or PR exists and is public.' }, 400, corsHeaders());
+  // Validate URL parses as a known GitHub pattern
+  if (!parseGithubUrl(ghUrl)) {
+    return jsonResponse({ error: 'githubUrl must point to a GitHub repo, issue, or PR.' }, 400, corsHeaders());
   }
+
+  // Try to fetch GitHub metadata (may fail due to rate limits on shared IPs)
+  const ghData = await fetchGithubData(ghUrl, context.env);
 
   const now = new Date().toISOString();
   const item = {
@@ -177,7 +221,7 @@ export async function onRequestPut(context) {
   if (body.githubUrl !== undefined) {
     item.githubUrl = body.githubUrl.trim();
     if (item.githubUrl) {
-      item.githubData = await fetchGithubData(item.githubUrl);
+      item.githubData = await fetchGithubData(item.githubUrl, context.env);
     } else {
       item.githubData = null;
     }
