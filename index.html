@@ -1045,7 +1045,7 @@ body::after {
   </div>
   <div class="hdr-right">
     <span class="item-count" id="itemCount"></span>
-    <button class="hdr-activity" id="activityBtn" onclick="toggleFeed()">Activity</button>
+    <button class="hdr-activity active" id="activityBtn" onclick="toggleFeed()">Activity</button>
     <button class="hdr-how" onclick="openModal()">How it works</button>
   </div>
 </header>
@@ -1078,7 +1078,7 @@ body::after {
 </main>
 
 <!-- Activity Feed -->
-<div class="feed-section" id="feedSection">
+<div class="feed-section open" id="feedSection">
   <div class="feed-header">
     <span class="feed-title">Activity Feed</span>
     <button class="feed-close" onclick="toggleFeed()">&times;</button>
@@ -1414,7 +1414,7 @@ function renderDeliverables(item) {
 }
 
 // ── Activity Feed ──
-let feedOpen = false;
+let feedOpen = true;
 let feedLoaded = false;
 
 async function loadFeed() {
@@ -1516,6 +1516,8 @@ document.addEventListener('keydown', e => {
 // ── Init ──
 renderLoading();
 loadItems();
+loadFeed();
+feedLoaded = true;
 
 // Auto-refresh every 30 seconds
 setInterval(loadItems, 30000);
