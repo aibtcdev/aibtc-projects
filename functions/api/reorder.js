@@ -1,4 +1,4 @@
-import { getAgent, jsonResponse, corsHeaders } from './_auth.js';
+import { getAgent, jsonResponse, corsHeaders, recordEvent } from './_auth.js';
 
 const KV_KEY = 'roadmap:items';
 
@@ -35,6 +35,14 @@ export async function onRequestPost(context) {
   data.items = reordered;
   data.updatedAt = new Date().toISOString();
   await context.env.ROADMAP_KV.put(KV_KEY, JSON.stringify(data));
+
+  context.waitUntil(recordEvent(context.env, {
+    type: 'item.reordered',
+    agent,
+    itemId: null,
+    itemTitle: null,
+    data: { count: reordered.length },
+  }));
 
   return jsonResponse({ ok: true, count: reordered.length }, 200, corsHeaders());
 }

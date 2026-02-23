@@ -60,3 +60,28 @@ export function corsHeaders() {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   };
 }
+
+// ── Event Recording ──
+const EVENTS_KEY = 'roadmap:events';
+const MAX_EVENTS = 200;
+
+export async function recordEvent(env, { type, agent, itemId, itemTitle, data }) {
+  const raw = await env.ROADMAP_KV.get(EVENTS_KEY, 'json');
+  const store = raw || { version: 1, events: [] };
+
+  store.events.unshift({
+    id: 'e_' + crypto.randomUUID().slice(0, 8),
+    type,
+    timestamp: new Date().toISOString(),
+    agent: agent ? { btcAddress: agent.btcAddress, displayName: agent.displayName, agentId: agent.agentId } : null,
+    itemId: itemId || null,
+    itemTitle: itemTitle || null,
+    data: data || {},
+  });
+
+  if (store.events.length > MAX_EVENTS) {
+    store.events = store.events.slice(0, MAX_EVENTS);
+  }
+
+  await env.ROADMAP_KV.put(EVENTS_KEY, JSON.stringify(store));
+}

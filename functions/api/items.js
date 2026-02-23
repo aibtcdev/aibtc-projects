@@ -1,10 +1,22 @@
-import { getAgent, jsonResponse, corsHeaders } from './_auth.js';
+import { getAgent, jsonResponse, corsHeaders, recordEvent } from './_auth.js';
 
 const KV_KEY = 'roadmap:items';
+const VALID_STATUSES = ['todo', 'in-progress', 'done', 'blocked', 'shipped', 'paid'];
 
 async function getData(env) {
   const raw = await env.ROADMAP_KV.get(KV_KEY, 'json');
-  return raw || { version: 1, items: [] };
+  const data = raw || { version: 1, items: [] };
+
+  // Lazy migration: normalize items missing new fields
+  if (data.version < 2) {
+    for (const item of data.items) {
+      if (item.claimedBy === undefined) item.claimedBy = null;
+      if (!Array.isArray(item.deliverables)) item.deliverables = [];
+    }
+    data.version = 2;
+  }
+
+  return data;
 }
 
 async function saveData(env, data) {
@@ -108,6 +120,7 @@ async function refreshStaleGithubData(env) {
   const data = await getData(env);
   const now = Date.now();
   let changed = false;
+  const autoCompleteEvents = [];
 
   for (const item of data.items) {
     if (!item.githubUrl) continue;
@@ -117,11 +130,15 @@ async function refreshStaleGithubData(env) {
     const fresh = await fetchGithubData(item.githubUrl, env);
     if (!fresh) continue;
 
-    // Auto-update status based on GitHub state
-    if (item.status !== 'done') {
+    // Auto-update status based on GitHub state (skip terminal statuses)
+    if (item.status !== 'done' && item.status !== 'shipped' && item.status !== 'paid') {
       const closed = fresh.state === 'closed' || fresh.state === 'archived';
       const merged = fresh.merged === true;
-      if (closed || merged) item.status = 'done';
+      if (closed || merged) {
+        const oldStatus = item.status;
+        item.status = 'done';
+        autoCompleteEvents.push({ itemId: item.id, itemTitle: item.title, oldStatus });
+      }
     }
 
     item.githubData = fresh;
@@ -129,7 +146,18 @@ async function refreshStaleGithubData(env) {
     changed = true;
   }
 
-  if (changed) await saveData(env, data);
+  if (changed) {
+    await saveData(env, data);
+    for (const ev of autoCompleteEvents) {
+      await recordEvent(env, {
+        type: 'item.auto_completed',
+        agent: null,
+        itemId: ev.itemId,
+        itemTitle: ev.itemTitle,
+        data: { oldStatus: ev.oldStatus, newStatus: 'done', reason: 'github_state' },
+      });
+    }
+  }
 }
 
 // GET - list all items (public, no auth)
@@ -166,6 +194,11 @@ export async function onRequestPost(context) {
     return jsonResponse({ error: 'githubUrl must point to a GitHub repo, issue, or PR.' }, 400, corsHeaders());
   }
 
+  const status = body.status || 'todo';
+  if (!VALID_STATUSES.includes(status)) {
+    return jsonResponse({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` }, 400, corsHeaders());
+  }
+
   // Try to fetch GitHub metadata (may fail due to rate limits on shared IPs)
   const ghData = await fetchGithubData(ghUrl, context.env);
 
@@ -187,7 +220,9 @@ export async function onRequestPost(context) {
       displayName: agent.displayName,
       agentId: agent.agentId,
     }],
-    status: body.status || 'todo',
+    status,
+    claimedBy: null,
+    deliverables: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -195,6 +230,14 @@ export async function onRequestPost(context) {
   const data = await getData(context.env);
   data.items.push(item);
   await saveData(context.env, data);
+
+  context.waitUntil(recordEvent(context.env, {
+    type: 'item.created',
+    agent,
+    itemId: item.id,
+    itemTitle: item.title,
+    data: { status: item.status },
+  }));
 
   return jsonResponse({ item, position: data.items.length - 1 }, 201, corsHeaders());
 }
@@ -214,9 +257,102 @@ export async function onRequestPut(context) {
   if (idx === -1) return jsonResponse({ error: 'Item not found' }, 404, corsHeaders());
 
   const item = data.items[idx];
+
+  // ── Claim action ──
+  if (body.action === 'claim') {
+    if (item.claimedBy) {
+      return jsonResponse({ error: 'Item is already claimed', claimedBy: item.claimedBy }, 409, corsHeaders());
+    }
+    item.claimedBy = {
+      btcAddress: agent.btcAddress,
+      displayName: agent.displayName,
+      agentId: agent.agentId,
+      claimedAt: new Date().toISOString(),
+    };
+    // Auto-transition todo → in-progress on claim
+    if (item.status === 'todo') item.status = 'in-progress';
+    addContributor(item, agent);
+    item.updatedAt = new Date().toISOString();
+    data.items[idx] = item;
+    await saveData(context.env, data);
+    context.waitUntil(recordEvent(context.env, {
+      type: 'item.claimed',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: {},
+    }));
+    return jsonResponse({ item }, 200, corsHeaders());
+  }
+
+  // ── Unclaim action ──
+  if (body.action === 'unclaim') {
+    if (!item.claimedBy) {
+      return jsonResponse({ error: 'Item is not claimed' }, 400, corsHeaders());
+    }
+    if (item.claimedBy.btcAddress !== agent.btcAddress) {
+      return jsonResponse({ error: 'Only the claimant can unclaim' }, 403, corsHeaders());
+    }
+    item.claimedBy = null;
+    item.updatedAt = new Date().toISOString();
+    data.items[idx] = item;
+    await saveData(context.env, data);
+    context.waitUntil(recordEvent(context.env, {
+      type: 'item.unclaimed',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: {},
+    }));
+    return jsonResponse({ item }, 200, corsHeaders());
+  }
+
+  // ── Add deliverable ──
+  if (body.deliverable) {
+    const d = body.deliverable;
+    if (!d.url || !d.url.trim()) {
+      return jsonResponse({ error: 'deliverable.url is required' }, 400, corsHeaders());
+    }
+    try { new URL(d.url.trim()); } catch {
+      return jsonResponse({ error: 'deliverable.url must be a valid URL' }, 400, corsHeaders());
+    }
+    if (!Array.isArray(item.deliverables)) item.deliverables = [];
+    item.deliverables.push({
+      id: 'd_' + crypto.randomUUID().slice(0, 8),
+      url: d.url.trim(),
+      title: (d.title || d.url.trim()).trim(),
+      addedBy: { btcAddress: agent.btcAddress, displayName: agent.displayName, agentId: agent.agentId },
+      addedAt: new Date().toISOString(),
+    });
+    addContributor(item, agent);
+    item.updatedAt = new Date().toISOString();
+    data.items[idx] = item;
+    await saveData(context.env, data);
+    context.waitUntil(recordEvent(context.env, {
+      type: 'item.deliverable_added',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: { url: d.url.trim(), title: (d.title || '').trim() },
+    }));
+    return jsonResponse({ item }, 200, corsHeaders());
+  }
+
+  // ── Standard field updates ──
+  const events = [];
+
   if (body.title !== undefined) item.title = body.title.trim();
   if (body.description !== undefined) item.description = body.description.trim();
-  if (body.status !== undefined) item.status = body.status;
+
+  if (body.status !== undefined) {
+    if (!VALID_STATUSES.includes(body.status)) {
+      return jsonResponse({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` }, 400, corsHeaders());
+    }
+    if (body.status !== item.status) {
+      events.push({ type: 'item.status_changed', data: { oldStatus: item.status, newStatus: body.status } });
+      item.status = body.status;
+    }
+  }
 
   if (body.githubUrl !== undefined) {
     item.githubUrl = body.githubUrl.trim();
@@ -233,6 +369,27 @@ export async function onRequestPut(context) {
   item.updatedAt = new Date().toISOString();
   data.items[idx] = item;
   await saveData(context.env, data);
+
+  // Emit events
+  if (events.length > 0) {
+    for (const ev of events) {
+      context.waitUntil(recordEvent(context.env, {
+        type: ev.type,
+        agent,
+        itemId: item.id,
+        itemTitle: item.title,
+        data: ev.data,
+      }));
+    }
+  } else {
+    context.waitUntil(recordEvent(context.env, {
+      type: 'item.updated',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: {},
+    }));
+  }
 
   return jsonResponse({ item }, 200, corsHeaders());
 }
@@ -251,8 +408,17 @@ export async function onRequestDelete(context) {
   const idx = data.items.findIndex(i => i.id === body.id);
   if (idx === -1) return jsonResponse({ error: 'Item not found' }, 404, corsHeaders());
 
+  const deleted = data.items[idx];
   data.items.splice(idx, 1);
   await saveData(context.env, data);
+
+  context.waitUntil(recordEvent(context.env, {
+    type: 'item.deleted',
+    agent,
+    itemId: deleted.id,
+    itemTitle: deleted.title,
+    data: {},
+  }));
 
   return jsonResponse({ ok: true }, 200, corsHeaders());
 }
