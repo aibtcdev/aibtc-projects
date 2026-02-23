@@ -581,6 +581,7 @@ body::after {
 .feed-dot.deliverable { background: #4a9eff; }
 .feed-dot.deleted { background: var(--red); }
 .feed-dot.reordered { background: var(--purple); }
+.feed-dot.mentioned { background: #4a9eff; }
 
 .feed-text { flex: 1; }
 .feed-agent { color: var(--t2); font-weight: 500; }
@@ -714,6 +715,23 @@ body::after {
 }
 
 .no-website { color: var(--t4); font-family: var(--mono); font-size: 10px; }
+
+/* ── Mentions ── */
+.th-mentions { width: 80px; }
+.cell-mentions { width: 80px; }
+
+.mentions-display {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.mentions-icon { font-size: 12px; color: var(--t4); }
+.mentions-count { color: var(--t2); font-weight: 600; }
+.mentions-count.hot { color: var(--o); }
+.no-mentions { color: var(--t4); font-family: var(--mono); font-size: 10px; }
 
 /* ── Reviews ── */
 .reviews-list {
@@ -1207,6 +1225,11 @@ body::after {
     order: 9;
   }
 
+  .cell-mentions {
+    width: auto;
+    order: 10;
+  }
+
   .cell-status {
     width: auto;
     order: 2;
@@ -1254,6 +1277,7 @@ body::after {
     <div class="th th-contrib">Contributors</div>
     <div class="th th-goals">Benchmark</div>
     <div class="th th-rating">Rating</div>
+    <div class="th th-mentions">Mentions</div>
     <div class="th th-status">Status</div>
   </div>
 
@@ -1480,6 +1504,7 @@ function renderLoading() {
       <div style="width:120px"><div class="skeleton-block" style="width:60px"></div></div>
       <div style="width:160px"><div class="skeleton-block" style="width:100px"></div></div>
       <div style="width:90px"><div class="skeleton-block" style="width:55px"></div></div>
+      <div style="width:80px"><div class="skeleton-block" style="width:40px"></div></div>
       <div style="width:100px"><div class="skeleton-block" style="width:65px"></div></div>
     </div>`;
   }
@@ -1528,6 +1553,7 @@ function render() {
       <div class="cell cell-contrib">${renderContributors(item)}</div>
       <div class="cell cell-goals">${renderGoals(item)}</div>
       <div class="cell cell-rating">${renderRating(item)}</div>
+      <div class="cell cell-mentions">${renderMentions(item)}</div>
       <div class="cell cell-status">
         <span class="status-pill ${statusCls}">${statusLabel}</span>
       </div>
@@ -1658,6 +1684,16 @@ function renderRating(item) {
   </div>`;
 }
 
+function renderMentions(item) {
+  const m = item.mentions;
+  if (!m || m.count === 0) return '<span class="no-mentions">\u2014</span>';
+  const hot = m.count >= 5;
+  return `<div class="mentions-display">
+    <span class="mentions-icon">\uD83D\uDCAC</span>
+    <span class="mentions-count ${hot ? 'hot' : ''}">${m.count}</span>
+  </div>`;
+}
+
 function renderReviews(item) {
   const ratings = (item.ratings || []).filter(r => r.review);
   if (ratings.length === 0) return '';
@@ -1723,6 +1759,8 @@ function feedEventDescription(ev) {
       return `${agentName} removed ${itemName}`;
     case 'item.reordered':
       return `${agentName} reordered projects`;
+    case 'item.mentioned':
+      return `${agentName} mentioned ${itemName} in a message`;
     case 'item.auto_completed':
       return `${itemName} auto-completed via GitHub`;
     default:
@@ -1734,6 +1772,7 @@ function feedDotClass(type) {
   if (type === 'item.created') return 'created';
   if (type.includes('status') || type === 'item.auto_completed') return 'status';
   if (type.includes('claim')) return 'claimed';
+  if (type === 'item.mentioned') return 'mentioned';
   if (type.includes('deliverable') || type === 'item.rated') return 'deliverable';
   if (type === 'item.deleted') return 'deleted';
   if (type === 'item.reordered') return 'reordered';

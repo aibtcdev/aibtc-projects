@@ -8,15 +8,16 @@ async function getData(env) {
   const data = raw || { version: 1, items: [] };
 
   // Lazy migration: normalize items missing new fields
-  if (data.version < 4) {
+  if (data.version < 5) {
     for (const item of data.items) {
       if (item.claimedBy === undefined) item.claimedBy = null;
       if (!Array.isArray(item.deliverables)) item.deliverables = [];
       if (!Array.isArray(item.ratings)) item.ratings = [];
       if (!item.reputation) item.reputation = { average: 0, count: 0 };
       if (!Array.isArray(item.goals)) item.goals = [];
+      if (!item.mentions) item.mentions = { count: 0 };
     }
-    data.version = 4;
+    data.version = 5;
   }
 
   return data;
@@ -170,12 +171,106 @@ async function refreshStaleGithubData(env) {
   }
 }
 
+// ── Mention Scanning ──
+const MENTION_SCAN_KEY = 'roadmap:mention-scan';
+const MENTION_SCAN_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+async function scanForMentions(env) {
+  // Check cooldown to avoid scanning on every request
+  const scanMeta = await env.ROADMAP_KV.get(MENTION_SCAN_KEY, 'json');
+  const lastScan = scanMeta?.lastScanAt ? new Date(scanMeta.lastScanAt).getTime() : 0;
+  if (Date.now() - lastScan < MENTION_SCAN_COOLDOWN_MS) return;
+
+  const processedIds = new Set(scanMeta?.processedIds || []);
+
+  // Fetch AIBTC network activity
+  let activityEvents;
+  try {
+    const res = await fetch('https://aibtc.com/api/activity', {
+      headers: { 'User-Agent': 'aibtc-projects/1.0' },
+    });
+    if (!res.ok) return;
+    const body = await res.json();
+    activityEvents = body.events || [];
+  } catch {
+    return;
+  }
+
+  if (activityEvents.length === 0) return;
+
+  // Filter to unprocessed message events that have preview text
+  const newEvents = activityEvents.filter(e =>
+    e.type === 'message' && e.messagePreview && !processedIds.has(e.timestamp)
+  );
+
+  if (newEvents.length === 0) {
+    // Update scan time even if no new events
+    await env.ROADMAP_KV.put(MENTION_SCAN_KEY, JSON.stringify({
+      lastScanAt: new Date().toISOString(),
+      processedIds: [...processedIds].slice(-500),
+    }));
+    return;
+  }
+
+  const data = await getData(env);
+  let changed = false;
+  const mentionEvents = [];
+
+  for (const ev of newEvents) {
+    const preview = (ev.messagePreview || '').toLowerCase();
+    processedIds.add(ev.timestamp);
+
+    for (const item of data.items) {
+      // Match against title (case-insensitive, word boundary-ish)
+      const titleMatch = item.title && preview.includes(item.title.toLowerCase());
+      // Match against GitHub URL or repo path
+      const ghPath = item.githubUrl ? item.githubUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\/$/, '').toLowerCase() : null;
+      const urlMatch = ghPath && (preview.includes(item.githubUrl.toLowerCase()) || preview.includes(ghPath));
+
+      if (titleMatch || urlMatch) {
+        if (!item.mentions) item.mentions = { count: 0 };
+        item.mentions.count += 1;
+        changed = true;
+        mentionEvents.push({
+          itemId: item.id,
+          itemTitle: item.title,
+          agent: ev.agent || null,
+          matchType: titleMatch ? 'title' : 'url',
+        });
+      }
+    }
+  }
+
+  // Save updated mention counts
+  if (changed) {
+    await saveData(env, data);
+  }
+
+  // Record mention events
+  for (const me of mentionEvents) {
+    await recordEvent(env, {
+      type: 'item.mentioned',
+      agent: me.agent ? { btcAddress: me.agent.btcAddress, displayName: me.agent.displayName, agentId: null } : null,
+      itemId: me.itemId,
+      itemTitle: me.itemTitle,
+      data: { matchType: me.matchType },
+    });
+  }
+
+  // Save scan metadata
+  await env.ROADMAP_KV.put(MENTION_SCAN_KEY, JSON.stringify({
+    lastScanAt: new Date().toISOString(),
+    processedIds: [...processedIds].slice(-500),
+  }));
+}
+
 // GET - list all items (public, no auth)
 export async function onRequestGet(context) {
   const data = await getData(context.env);
 
-  // Kick off background refresh for stale GitHub data
+  // Kick off background tasks
   context.waitUntil(refreshStaleGithubData(context.env));
+  context.waitUntil(scanForMentions(context.env));
 
   return jsonResponse(data, 200, corsHeaders());
 }
@@ -241,6 +336,7 @@ export async function onRequestPost(context) {
     ratings: [],
     reputation: { average: 0, count: 0 },
     goals: [],
+    mentions: { count: 0 },
     createdAt: now,
     updatedAt: now,
   };
