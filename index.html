@@ -687,6 +687,34 @@ body::after {
 
 .no-goals { color: var(--t4); font-family: var(--mono); font-size: 10px; }
 
+/* ── Website ── */
+.th-website { width: 140px; }
+.cell-website { width: 140px; }
+
+.website-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: #4a9eff;
+  text-decoration: none;
+  max-width: 135px;
+  transition: color var(--transition);
+}
+
+.website-link:hover { color: #6cb4ff; }
+
+.website-link svg { width: 11px; height: 11px; fill: currentColor; flex-shrink: 0; }
+
+.website-link-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.no-website { color: var(--t4); font-family: var(--mono); font-size: 10px; }
+
 /* ── Reviews ── */
 .reviews-list {
   margin-top: 3px;
@@ -1145,9 +1173,14 @@ body::after {
     order: 3;
   }
 
-  .cell-founder {
+  .cell-website {
     width: auto;
     order: 4;
+  }
+
+  .cell-founder {
+    width: auto;
+    order: 5;
   }
 
   .cell-date {
@@ -1215,6 +1248,7 @@ body::after {
     <div class="th th-num">#</div>
     <div class="th th-project">Project</div>
     <div class="th th-gh">GitHub</div>
+    <div class="th th-website">Website</div>
     <div class="th th-founder">Submitter</div>
     <div class="th th-date">Added</div>
     <div class="th th-contrib">Contributors</div>
@@ -1440,6 +1474,7 @@ function renderLoading() {
       <div style="width:40px;display:flex;justify-content:center"><div class="skeleton-block" style="width:20px"></div></div>
       <div style="flex:1;padding-right:12px"><div class="skeleton-block" style="width:${50 + Math.random() * 35}%"></div></div>
       <div style="width:200px"><div class="skeleton-block" style="width:100px"></div></div>
+      <div style="width:140px"><div class="skeleton-block" style="width:80px"></div></div>
       <div style="width:150px"><div class="skeleton-block" style="width:80px"></div></div>
       <div style="width:80px"><div class="skeleton-block" style="width:50px"></div></div>
       <div style="width:120px"><div class="skeleton-block" style="width:60px"></div></div>
@@ -1487,6 +1522,7 @@ function render() {
         </div>
       </div>
       <div class="cell cell-gh">${renderGhBadge(item)}</div>
+      <div class="cell cell-website">${renderWebsite(item)}</div>
       <div class="cell cell-founder">${renderFounder(item)}</div>
       <div class="cell cell-date">${shortDate(item.createdAt)}</div>
       <div class="cell cell-contrib">${renderContributors(item)}</div>
@@ -1576,6 +1612,15 @@ function renderDeliverables(item) {
     `<a class="deliverable-link" href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.title)}">${linkSvg}${esc(d.title)}</a>`
   ).join('');
   return `<div class="deliverable-links">${links}</div>`;
+}
+
+function renderWebsite(item) {
+  const url = item.githubData?.homepage;
+  if (!url) return '<span class="no-website">\u2014</span>';
+  const globeSvg = '<svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1.543 7.25h2.733c.144-2.074.866-3.756 1.58-4.948a6.507 6.507 0 00-4.313 4.948zm6.457-5.7C7.318 2.539 6.474 4.337 6.286 7.25h3.428c-.188-2.913-1.032-4.711-1.714-5.7zm3.667 5.7c-.144-2.074-.866-3.756-1.58-4.948a6.507 6.507 0 014.313 4.948h-2.733zm-3.667 1.5c.188 2.913 1.032 4.711 1.714 5.7.682-.989 1.526-2.787 1.714-5.7H7.286zM4.276 8.75c.144 2.074.866 3.756 1.58 4.948a6.507 6.507 0 01-4.313-4.948h2.733zm7.448 0h2.733a6.507 6.507 0 01-4.313 4.948c.714-1.192 1.436-2.874 1.58-4.948zM8 0a8 8 0 100 16A8 8 0 008 0z"/></svg>';
+  let label;
+  try { label = new URL(url).hostname.replace(/^www\./, ''); } catch { label = url; }
+  return `<a class="website-link" href="${esc(url)}" target="_blank" rel="noopener" title="${esc(url)}">${globeSvg}<span class="website-link-text">${esc(label)}</span></a>`;
 }
 
 function renderGoals(item) {

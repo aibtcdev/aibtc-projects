@@ -79,6 +79,7 @@ async function fetchGithubData(url, env) {
         assignees: [],
         labels: d.topics || [],
         stars: d.stargazers_count,
+        homepage: d.homepage || null,
         fetchedAt: new Date().toISOString(),
       };
     }
