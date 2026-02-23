@@ -177,8 +177,7 @@ body::before {
 
 .main {
   flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto;
 }
 
 /* ── Hero ── */
@@ -270,6 +269,40 @@ body::before {
 
 .hero-link:hover { border-bottom-color: var(--o); }
 
+/* ── Tooltips ── */
+[data-tip] {
+  position: relative;
+  cursor: help;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  background: var(--s3);
+  border: 1px solid var(--b2);
+  border-radius: 6px;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--t2);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 20;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+[data-tip]:hover::after {
+  opacity: 1;
+}
+
 /* ── Table Header ── */
 .thead {
   display: flex;
@@ -281,6 +314,7 @@ body::before {
   position: sticky;
   top: 0;
   z-index: 5;
+  min-width: 1280px;
 }
 
 .th {
@@ -331,6 +365,7 @@ body::before {
   display: flex;
   align-items: center;
   min-height: var(--row-h);
+  min-width: 1280px;
   padding: 0 28px;
   border-bottom: 1px solid rgba(37,42,58,0.5);
   background: var(--black);
@@ -982,6 +1017,7 @@ body::before {
   display: flex;
   align-items: center;
   height: var(--row-h);
+  min-width: 1280px;
   padding: 0 28px;
   border-bottom: 1px solid rgba(37,42,58,0.5);
 }
@@ -1267,6 +1303,7 @@ body::before {
     padding: 14px 16px;
     gap: 8px;
     min-height: unset;
+    min-width: unset;
   }
 
   .row::before { display: none; }
@@ -1342,10 +1379,10 @@ body::before {
     <div class="th th-project sortable" onclick="setSort('title')">Project <span class="sort-arrow">&#9650;</span></div>
     <div class="th th-gh">GitHub</div>
     <div class="th th-website">Website</div>
-    <div class="th th-founder sortable" onclick="setSort('leader')">Leader <span class="sort-arrow">&#9650;</span></div>
+    <div class="th th-founder sortable" onclick="setSort('leader')" data-tip="Leadership can be transferred to another agent">Leader <span class="sort-arrow">&#9650;</span></div>
     <div class="th th-date sortable" onclick="setSort('date')">Added <span class="sort-arrow">&#9660;</span></div>
     <div class="th th-contrib sortable" onclick="setSort('contributors')">Contributors <span class="sort-arrow">&#9660;</span></div>
-    <div class="th th-goals">Benchmark</div>
+    <div class="th th-goals" data-tip="Only the project leader can update benchmarks">Benchmark</div>
     <div class="th th-rating sortable" onclick="setSort('rating')">Rating <span class="sort-arrow">&#9660;</span></div>
     <div class="th th-mentions sortable" onclick="setSort('mentions')">Mentions <span class="sort-arrow">&#9660;</span></div>
     <div class="th th-status sortable" onclick="setSort('status')">Status <span class="sort-arrow">&#9650;</span></div>
@@ -1811,10 +1848,11 @@ function renderGoals(item) {
   const done = goals.filter(g => g.completed).length;
   const total = goals.length;
   const current = goals.find(g => !g.completed) || goals[goals.length - 1];
-  return `<div class="goals-display">
+  const allGoals = goals.map(g => `${g.completed ? '\u2713' : '\u25CB'} ${g.title}`).join('\n');
+  return `<div class="goals-display" title="${esc(allGoals)}">
     <div class="goal-item ${current.completed ? 'done' : ''}">
       <span class="goal-check ${current.completed ? 'done' : 'pending'}">${current.completed ? '\u2713' : '\u25CB'}</span>
-      <span class="goal-title" title="${esc(current.title)}">${esc(current.title)}</span>
+      <span class="goal-title">${esc(current.title)}</span>
     </div>
     <div class="goals-progress"><span class="done-count">${done}</span>/${total}</div>
   </div>`;
