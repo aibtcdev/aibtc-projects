@@ -22,7 +22,7 @@ export async function getAgent(request, env) {
   // Verify against aibtc.com
   try {
     const res = await fetch(`${AIBTC_API}/${encodeURIComponent(address)}`, {
-      headers: { 'User-Agent': 'aibtc-roadmap' },
+      headers: { 'User-Agent': 'aibtc-projects' },
     });
     if (!res.ok) return null;
 

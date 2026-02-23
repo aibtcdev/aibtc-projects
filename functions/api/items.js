@@ -54,7 +54,7 @@ async function fetchGithubData(url, env) {
     }
 
     const headers = {
-      'User-Agent': 'aibtc-roadmap/1.0',
+      'User-Agent': 'aibtc-projects/1.0',
       Accept: 'application/vnd.github+json',
     };
     // Use GitHub token if available (avoids 403 from shared Cloudflare IPs)
