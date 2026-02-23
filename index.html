@@ -1415,8 +1415,6 @@ function render() {
         <div>
           <div class="project-title">${esc(item.title)}</div>
           ${item.description ? `<div class="project-desc">${esc(item.description)}</div>` : ''}
-          ${renderDeliverables(item)}
-          ${renderReviews(item)}
         </div>
       </div>
       <div class="cell cell-gh">${renderGhBadge(item)}</div>
