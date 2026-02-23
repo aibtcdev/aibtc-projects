@@ -176,6 +176,26 @@ body::after {
   user-select: none;
 }
 
+.th.sortable {
+  cursor: pointer;
+  transition: color var(--transition);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.th.sortable:hover { color: var(--t2); }
+.th.sortable.active { color: var(--o); }
+
+.sort-arrow {
+  font-size: 8px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.th.sortable:hover .sort-arrow { opacity: 0.4; }
+.th.sortable.active .sort-arrow { opacity: 1; }
+
 .th-num { width: 40px; text-align: center; }
 .th-project { flex: 1; min-width: 160px; }
 .th-gh { width: 200px; }
@@ -1268,17 +1288,17 @@ body::after {
   </section>
 
   <div class="thead">
-    <div class="th th-num">#</div>
-    <div class="th th-project">Project</div>
+    <div class="th th-num sortable active" onclick="setSort('priority')"># <span class="sort-arrow">&#9650;</span></div>
+    <div class="th th-project sortable" onclick="setSort('title')">Project <span class="sort-arrow">&#9650;</span></div>
     <div class="th th-gh">GitHub</div>
     <div class="th th-website">Website</div>
-    <div class="th th-founder">Leader</div>
-    <div class="th th-date">Added</div>
-    <div class="th th-contrib">Contributors</div>
+    <div class="th th-founder sortable" onclick="setSort('leader')">Leader <span class="sort-arrow">&#9650;</span></div>
+    <div class="th th-date sortable" onclick="setSort('date')">Added <span class="sort-arrow">&#9660;</span></div>
+    <div class="th th-contrib sortable" onclick="setSort('contributors')">Contributors <span class="sort-arrow">&#9660;</span></div>
     <div class="th th-goals">Benchmark</div>
-    <div class="th th-rating">Rating</div>
-    <div class="th th-mentions">Mentions</div>
-    <div class="th th-status">Status</div>
+    <div class="th th-rating sortable" onclick="setSort('rating')">Rating <span class="sort-arrow">&#9660;</span></div>
+    <div class="th th-mentions sortable" onclick="setSort('mentions')">Mentions <span class="sort-arrow">&#9660;</span></div>
+    <div class="th th-status sortable" onclick="setSort('status')">Status <span class="sort-arrow">&#9650;</span></div>
   </div>
 
   <div class="tbody" id="tbody">
@@ -1471,6 +1491,64 @@ body::after {
 // ── State ──
 let items = [];
 let loading = true;
+let sortKey = 'priority';
+let sortAsc = true;
+
+// ── Sorting ──
+const STATUS_ORDER = { 'in-progress': 0, 'todo': 1, 'blocked': 2, 'done': 3, 'shipped': 4, 'paid': 5 };
+
+function getSortValue(item, key) {
+  switch (key) {
+    case 'priority': return 0; // use original index
+    case 'title': return (item.title || '').toLowerCase();
+    case 'leader': return (item.leader?.displayName || item.claimedBy?.displayName || item.founder?.displayName || 'zzz').toLowerCase();
+    case 'date': return item.createdAt ? new Date(item.createdAt).getTime() : 0;
+    case 'contributors': return (item.contributors || []).length;
+    case 'rating': return item.reputation?.average || 0;
+    case 'mentions': return item.mentions?.count || 0;
+    case 'status': return STATUS_ORDER[item.status] ?? 99;
+    default: return 0;
+  }
+}
+
+function sortItems(list) {
+  if (sortKey === 'priority') {
+    return sortAsc ? list : [...list].reverse();
+  }
+  return [...list].sort((a, b) => {
+    const va = getSortValue(a, sortKey);
+    const vb = getSortValue(b, sortKey);
+    let cmp = 0;
+    if (typeof va === 'string') cmp = va.localeCompare(vb);
+    else cmp = va - vb;
+    return sortAsc ? cmp : -cmp;
+  });
+}
+
+function setSort(key) {
+  if (sortKey === key) {
+    sortAsc = !sortAsc;
+  } else {
+    sortKey = key;
+    // Default direction: descending for numeric columns, ascending for text
+    sortAsc = (key === 'priority' || key === 'title' || key === 'leader' || key === 'status');
+  }
+  updateSortHeaders();
+  render();
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('.thead .th.sortable').forEach(th => {
+    const arrow = th.querySelector('.sort-arrow');
+    const thKey = th.getAttribute('onclick')?.match(/setSort\('(\w+)'\)/)?.[1];
+    if (thKey === sortKey) {
+      th.classList.add('active');
+      if (arrow) arrow.innerHTML = sortAsc ? '&#9650;' : '&#9660;';
+    } else {
+      th.classList.remove('active');
+    }
+  });
+}
 
 // ── SVG Icons ──
 const ICONS = {
@@ -1568,13 +1646,15 @@ function render() {
     return;
   }
 
+  const sorted = sortItems(items);
   let html = '';
-  items.forEach((item, i) => {
+  sorted.forEach((item, i) => {
+    const origIdx = items.indexOf(item);
     const statusCls = 'status-' + item.status;
     const statusLabel = STATUS_LABELS[item.status] || item.status;
 
     html += `<div class="row">
-      <div class="cell cell-num">${i + 1}</div>
+      <div class="cell cell-num">${origIdx + 1}</div>
       <div class="cell cell-project">
         <div>
           <div class="project-title">${esc(item.title)}</div>
