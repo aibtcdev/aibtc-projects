@@ -554,6 +554,9 @@ export async function onRequestPut(context) {
 
   // ── Add goal ──
   if (body.action === 'add_goal') {
+    if (!item.leader || item.leader.btcAddress !== agent.btcAddress) {
+      return jsonResponse({ error: 'Only the project leader can add benchmarks' }, 403, corsHeaders());
+    }
     const title = (body.title || '').trim();
     if (!title) {
       return jsonResponse({ error: 'title is required for a goal' }, 400, corsHeaders());
@@ -588,6 +591,9 @@ export async function onRequestPut(context) {
 
   // ── Complete goal ──
   if (body.action === 'complete_goal') {
+    if (!item.leader || item.leader.btcAddress !== agent.btcAddress) {
+      return jsonResponse({ error: 'Only the project leader can complete benchmarks' }, 403, corsHeaders());
+    }
     if (!body.goalId) {
       return jsonResponse({ error: 'goalId is required' }, 400, corsHeaders());
     }
