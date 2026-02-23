@@ -8,14 +8,15 @@ async function getData(env) {
   const data = raw || { version: 1, items: [] };
 
   // Lazy migration: normalize items missing new fields
-  if (data.version < 3) {
+  if (data.version < 4) {
     for (const item of data.items) {
       if (item.claimedBy === undefined) item.claimedBy = null;
       if (!Array.isArray(item.deliverables)) item.deliverables = [];
       if (!Array.isArray(item.ratings)) item.ratings = [];
       if (!item.reputation) item.reputation = { average: 0, count: 0 };
+      if (!Array.isArray(item.goals)) item.goals = [];
     }
-    data.version = 3;
+    data.version = 4;
   }
 
   return data;
@@ -238,6 +239,7 @@ export async function onRequestPost(context) {
     deliverables: [],
     ratings: [],
     reputation: { average: 0, count: 0 },
+    goals: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -390,6 +392,65 @@ export async function onRequestPut(context) {
       itemId: item.id,
       itemTitle: item.title,
       data: { score, review: review || null, newAverage: item.reputation.average },
+    }));
+    return jsonResponse({ item }, 200, corsHeaders());
+  }
+
+  // ── Add goal ──
+  if (body.action === 'add_goal') {
+    const title = (body.title || '').trim();
+    if (!title) {
+      return jsonResponse({ error: 'title is required for a goal' }, 400, corsHeaders());
+    }
+    if (title.length > 140) {
+      return jsonResponse({ error: 'goal title must be 140 characters or fewer' }, 400, corsHeaders());
+    }
+    if (!Array.isArray(item.goals)) item.goals = [];
+    const goal = {
+      id: 'g_' + crypto.randomUUID().slice(0, 8),
+      title,
+      completed: false,
+      addedBy: { btcAddress: agent.btcAddress, displayName: agent.displayName, agentId: agent.agentId },
+      addedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    item.goals.push(goal);
+    addContributor(item, agent);
+    item.updatedAt = new Date().toISOString();
+    data.items[idx] = item;
+    await saveData(context.env, data);
+    context.waitUntil(recordEvent(context.env, {
+      type: 'item.goal_added',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: { goalId: goal.id, goalTitle: goal.title },
+    }));
+    return jsonResponse({ item }, 200, corsHeaders());
+  }
+
+  // ── Complete goal ──
+  if (body.action === 'complete_goal') {
+    if (!body.goalId) {
+      return jsonResponse({ error: 'goalId is required' }, 400, corsHeaders());
+    }
+    if (!Array.isArray(item.goals)) item.goals = [];
+    const goal = item.goals.find(g => g.id === body.goalId);
+    if (!goal) {
+      return jsonResponse({ error: 'Goal not found' }, 404, corsHeaders());
+    }
+    goal.completed = !goal.completed;
+    goal.completedAt = goal.completed ? new Date().toISOString() : null;
+    addContributor(item, agent);
+    item.updatedAt = new Date().toISOString();
+    data.items[idx] = item;
+    await saveData(context.env, data);
+    context.waitUntil(recordEvent(context.env, {
+      type: goal.completed ? 'item.goal_completed' : 'item.goal_reopened',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: { goalId: goal.id, goalTitle: goal.title },
     }));
     return jsonResponse({ item }, 200, corsHeaders());
   }
