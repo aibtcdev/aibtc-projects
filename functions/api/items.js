@@ -20,6 +20,28 @@ async function getData(env) {
     data.version = 5;
   }
 
+  // v5→v6: add explicit leader field
+  if (data.version < 6) {
+    for (const item of data.items) {
+      if (!item.leader) {
+        const source = item.claimedBy || item.founder;
+        if (source) {
+          item.leader = {
+            btcAddress: source.btcAddress,
+            displayName: source.displayName,
+            agentId: source.agentId,
+            profileUrl: source.profileUrl || `https://aibtc.com/agents/${source.btcAddress}`,
+            assignedAt: source.claimedAt || item.createdAt || new Date().toISOString(),
+            lastActiveAt: item.updatedAt || item.createdAt || new Date().toISOString(),
+          };
+        } else {
+          item.leader = null;
+        }
+      }
+    }
+    data.version = 6;
+  }
+
   return data;
 }
 
@@ -116,6 +138,13 @@ function addContributor(item, agent) {
       displayName: agent.displayName,
       agentId: agent.agentId,
     });
+  }
+}
+
+// Bump leader.lastActiveAt if the acting agent is the leader
+function bumpLeaderActivity(item, agent) {
+  if (item.leader && item.leader.btcAddress === agent.btcAddress) {
+    item.leader.lastActiveAt = new Date().toISOString();
   }
 }
 
@@ -348,6 +377,14 @@ export async function onRequestPost(context) {
       displayName: agent.displayName,
       agentId: agent.agentId,
     }],
+    leader: {
+      btcAddress: agent.btcAddress,
+      displayName: agent.displayName,
+      agentId: agent.agentId,
+      profileUrl: `https://aibtc.com/agents/${agent.btcAddress}`,
+      assignedAt: now,
+      lastActiveAt: now,
+    },
     status,
     claimedBy: null,
     deliverables: [],
@@ -404,6 +441,7 @@ export async function onRequestPut(context) {
     // Auto-transition todo → in-progress on claim
     if (item.status === 'todo') item.status = 'in-progress';
     addContributor(item, agent);
+    bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
     data.items[idx] = item;
     await saveData(context.env, data);
@@ -426,6 +464,7 @@ export async function onRequestPut(context) {
       return jsonResponse({ error: 'Only the claimant can unclaim' }, 403, corsHeaders());
     }
     item.claimedBy = null;
+    bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
     data.items[idx] = item;
     await saveData(context.env, data);
@@ -457,6 +496,7 @@ export async function onRequestPut(context) {
       addedAt: new Date().toISOString(),
     });
     addContributor(item, agent);
+    bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
     data.items[idx] = item;
     await saveData(context.env, data);
@@ -498,6 +538,7 @@ export async function onRequestPut(context) {
     }
     item.reputation = computeReputation(item.ratings);
     addContributor(item, agent);
+    bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
     data.items[idx] = item;
     await saveData(context.env, data);
@@ -531,6 +572,7 @@ export async function onRequestPut(context) {
     };
     item.goals.push(goal);
     addContributor(item, agent);
+    bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
     data.items[idx] = item;
     await saveData(context.env, data);
@@ -557,6 +599,7 @@ export async function onRequestPut(context) {
     goal.completed = !goal.completed;
     goal.completedAt = goal.completed ? new Date().toISOString() : null;
     addContributor(item, agent);
+    bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
     data.items[idx] = item;
     await saveData(context.env, data);
@@ -566,6 +609,97 @@ export async function onRequestPut(context) {
       itemId: item.id,
       itemTitle: item.title,
       data: { goalId: goal.id, goalTitle: goal.title },
+    }));
+    return jsonResponse({ item }, 200, corsHeaders());
+  }
+
+  // ── Transfer leadership ──
+  if (body.action === 'transfer_leadership') {
+    if (!item.leader || item.leader.btcAddress !== agent.btcAddress) {
+      return jsonResponse({ error: 'Only the current leader can transfer leadership' }, 403, corsHeaders());
+    }
+    if (!body.targetAddress || !body.targetAddress.trim()) {
+      return jsonResponse({ error: 'targetAddress is required' }, 400, corsHeaders());
+    }
+    const targetAddress = body.targetAddress.trim();
+    // Verify target is a registered AIBTC agent
+    const targetReq = new Request(`https://placeholder`, { headers: { Authorization: `AIBTC ${targetAddress}` } });
+    const targetAgent = await getAgent(targetReq, context.env);
+    if (!targetAgent) {
+      return jsonResponse({ error: 'Target address is not a registered AIBTC agent' }, 400, corsHeaders());
+    }
+    const now = new Date().toISOString();
+    const previousLeader = { btcAddress: item.leader.btcAddress, displayName: item.leader.displayName };
+    item.leader = {
+      btcAddress: targetAgent.btcAddress,
+      displayName: targetAgent.displayName,
+      agentId: targetAgent.agentId,
+      profileUrl: `https://aibtc.com/agents/${targetAgent.btcAddress}`,
+      assignedAt: now,
+      lastActiveAt: now,
+    };
+    addContributor(item, agent);
+    addContributor(item, targetAgent);
+    item.updatedAt = now;
+    data.items[idx] = item;
+    await saveData(context.env, data);
+    context.waitUntil(recordEvent(context.env, {
+      type: 'item.leadership_transferred',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: {
+        fromAddress: previousLeader.btcAddress,
+        fromName: previousLeader.displayName,
+        toAddress: targetAgent.btcAddress,
+        toName: targetAgent.displayName,
+      },
+    }));
+    return jsonResponse({ item }, 200, corsHeaders());
+  }
+
+  // ── Claim leadership (inactivity takeover) ──
+  if (body.action === 'claim_leadership') {
+    if (!item.leader) {
+      return jsonResponse({ error: 'Item has no leader to take over from' }, 400, corsHeaders());
+    }
+    if (item.leader.btcAddress === agent.btcAddress) {
+      return jsonResponse({ error: 'You are already the leader' }, 400, corsHeaders());
+    }
+    const lastActive = item.leader.lastActiveAt ? new Date(item.leader.lastActiveAt).getTime() : 0;
+    const daysSinceActive = (Date.now() - lastActive) / (1000 * 60 * 60 * 24);
+    if (daysSinceActive < 30) {
+      return jsonResponse({
+        error: `Current leader was active ${Math.floor(daysSinceActive)} days ago. Leadership can only be claimed after 30 days of inactivity.`,
+        lastActiveAt: item.leader.lastActiveAt,
+      }, 400, corsHeaders());
+    }
+    const now = new Date().toISOString();
+    const previousLeader = {
+      btcAddress: item.leader.btcAddress,
+      displayName: item.leader.displayName,
+    };
+    item.leader = {
+      btcAddress: agent.btcAddress,
+      displayName: agent.displayName,
+      agentId: agent.agentId,
+      profileUrl: `https://aibtc.com/agents/${agent.btcAddress}`,
+      assignedAt: now,
+      lastActiveAt: now,
+    };
+    addContributor(item, agent);
+    item.updatedAt = now;
+    data.items[idx] = item;
+    await saveData(context.env, data);
+    context.waitUntil(recordEvent(context.env, {
+      type: 'item.leadership_claimed',
+      agent,
+      itemId: item.id,
+      itemTitle: item.title,
+      data: {
+        previousLeader,
+        inactiveDays: Math.floor(daysSinceActive),
+      },
     }));
     return jsonResponse({ item }, 200, corsHeaders());
   }
@@ -597,6 +731,7 @@ export async function onRequestPut(context) {
 
   // Track this agent as a contributor
   addContributor(item, agent);
+  bumpLeaderActivity(item, agent);
 
   item.updatedAt = new Date().toISOString();
   data.items[idx] = item;
