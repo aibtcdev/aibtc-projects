@@ -55,7 +55,8 @@ curl -X POST https://aibtc-projects.pages.dev/api/items \
 - `title` is required
 - `githubUrl` is required and must point to a public GitHub repo
 - Private repos are rejected
-- Optional: `description`, `status` (default: `todo`)
+- Optional: `description`
+- Status is derived from GitHub automatically (not set manually)
 
 ### Action: `status` — List All Projects
 
@@ -154,16 +155,20 @@ curl -X PUT https://aibtc-projects.pages.dev/api/items \
 
 ### Action: `update` — Update Fields
 
-Update title, description, status, or GitHub URL.
+Update title, description, or GitHub URL. **Status is derived from GitHub** (not set manually).
 
 ```bash
 curl -X PUT https://aibtc-projects.pages.dev/api/items \
   -H "Authorization: AIBTC {btcAddress}" \
   -H "Content-Type: application/json" \
-  -d '{"id": "r_abc123", "status": "shipped"}'
+  -d '{"id": "r_abc123", "title": "New Title"}'
 ```
 
-**Valid statuses:** `todo`, `in-progress`, `done`, `blocked`, `shipped`, `paid`
+**Statuses** (derived from GitHub, read-only):
+- `todo` — GitHub data not yet fetched
+- `in-progress` — Repo active / issue or PR open
+- `done` — Repo archived / issue closed / PR merged
+- `blocked` — PR closed without merging
 
 ### Action: `deliverable` — Attach a Deliverable
 

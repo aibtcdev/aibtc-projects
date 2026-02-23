@@ -1,7 +1,6 @@
 import { getAgent, jsonResponse, corsHeaders, recordEvent } from './_auth.js';
 
 const KV_KEY = 'roadmap:items';
-const VALID_STATUSES = ['todo', 'in-progress', 'done', 'blocked', 'shipped', 'paid'];
 
 async function getData(env) {
   const raw = await env.ROADMAP_KV.get(KV_KEY, 'json');
@@ -148,6 +147,20 @@ function bumpLeaderActivity(item, agent) {
   }
 }
 
+// Derive status from GitHub state — single source of truth
+function deriveStatus(item) {
+  const gd = item.githubData;
+  if (!gd || !gd.type) return 'todo';
+  if (gd.type === 'repo') return gd.state === 'archived' ? 'done' : 'in-progress';
+  if (gd.type === 'pr') {
+    if (gd.merged) return 'done';
+    if (gd.state === 'closed') return 'blocked';
+    return 'in-progress';
+  }
+  // issue
+  return gd.state === 'closed' ? 'done' : 'in-progress';
+}
+
 // OPTIONS - CORS preflight
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: corsHeaders() });
@@ -170,18 +183,13 @@ async function refreshStaleGithubData(env) {
     const fresh = await fetchGithubData(item.githubUrl, env);
     if (!fresh) continue;
 
-    // Auto-update status based on GitHub state (skip terminal statuses)
-    if (item.status !== 'done' && item.status !== 'shipped' && item.status !== 'paid') {
-      const closed = fresh.state === 'closed' || fresh.state === 'archived';
-      const merged = fresh.merged === true;
-      if (closed || merged) {
-        const oldStatus = item.status;
-        item.status = 'done';
-        autoCompleteEvents.push({ itemId: item.id, itemTitle: item.title, oldStatus });
-      }
-    }
-
+    // Track status transitions from GitHub state changes
+    const oldStatus = deriveStatus(item);
     item.githubData = fresh;
+    const newStatus = deriveStatus(item);
+    if (oldStatus !== newStatus) {
+      autoCompleteEvents.push({ itemId: item.id, itemTitle: item.title, oldStatus, newStatus });
+    }
     item.updatedAt = new Date().toISOString();
     changed = true;
   }
@@ -190,11 +198,11 @@ async function refreshStaleGithubData(env) {
     await saveData(env, data);
     for (const ev of autoCompleteEvents) {
       await recordEvent(env, {
-        type: 'item.auto_completed',
+        type: 'item.status_synced',
         agent: null,
         itemId: ev.itemId,
         itemTitle: ev.itemTitle,
-        data: { oldStatus: ev.oldStatus, newStatus: 'done', reason: 'github_state' },
+        data: { oldStatus: ev.oldStatus, newStatus: ev.newStatus, reason: 'github_state' },
       });
     }
   }
@@ -315,6 +323,11 @@ async function scanForMentions(env) {
 export async function onRequestGet(context) {
   const data = await getData(context.env);
 
+  // Derive status from GitHub state for every item
+  for (const item of data.items) {
+    item.status = deriveStatus(item);
+  }
+
   // Kick off background tasks
   context.waitUntil(refreshStaleGithubData(context.env));
   context.waitUntil(scanForMentions(context.env));
@@ -345,11 +358,6 @@ export async function onRequestPost(context) {
   const parsed = parseGithubUrl(ghUrl);
   if (!parsed || parsed.type !== 'repo') {
     return jsonResponse({ error: 'githubUrl must point to a GitHub repo (e.g. github.com/org/repo), not an issue or PR.' }, 400, corsHeaders());
-  }
-
-  const status = body.status || 'todo';
-  if (!VALID_STATUSES.includes(status)) {
-    return jsonResponse({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` }, 400, corsHeaders());
   }
 
   // Fetch GitHub metadata (non-blocking — rate limits shouldn't prevent submission)
@@ -385,7 +393,7 @@ export async function onRequestPost(context) {
       assignedAt: now,
       lastActiveAt: now,
     },
-    status,
+    status: deriveStatus({ githubData: ghData }),
     claimedBy: null,
     deliverables: [],
     ratings: [],
@@ -438,8 +446,6 @@ export async function onRequestPut(context) {
       agentId: agent.agentId,
       claimedAt: new Date().toISOString(),
     };
-    // Auto-transition todo → in-progress on claim
-    if (item.status === 'todo') item.status = 'in-progress';
     addContributor(item, agent);
     bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
@@ -715,16 +721,6 @@ export async function onRequestPut(context) {
 
   if (body.title !== undefined) item.title = body.title.trim();
   if (body.description !== undefined) item.description = body.description.trim();
-
-  if (body.status !== undefined) {
-    if (!VALID_STATUSES.includes(body.status)) {
-      return jsonResponse({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` }, 400, corsHeaders());
-    }
-    if (body.status !== item.status) {
-      events.push({ type: 'item.status_changed', data: { oldStatus: item.status, newStatus: body.status } });
-      item.status = body.status;
-    }
-  }
 
   if (body.githubUrl !== undefined) {
     item.githubUrl = body.githubUrl.trim();
