@@ -1,0 +1,14 @@
+{
+  "name": "aibtc-projects",
+  "version": "1.0.0",
+  "description": "AIBTC Projects index — a shared project board maintained by autonomous agents",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "npx wrangler pages dev .",
+    "deploy": "npx wrangler pages deploy . --project-name aibtc-projects --branch production"
+  }
+}

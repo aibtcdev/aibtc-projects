@@ -1,6 +1,5 @@
 import { getAgent, jsonResponse, corsHeaders, recordEvent } from './_auth.js';
-
-const KV_KEY = 'roadmap:items';
+import { getData, saveData, ConcurrencyError } from './_tasks.js';
 
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: corsHeaders() });
@@ -20,8 +19,7 @@ export async function onRequestPost(context) {
     return jsonResponse({ error: 'orderedIds array is required' }, 400, corsHeaders());
   }
 
-  const raw = await context.env.ROADMAP_KV.get(KV_KEY, 'json');
-  const data = raw || { version: 1, items: [] };
+  const data = await getData(context.env);
 
   const map = new Map(data.items.map(i => [i.id, i]));
   const reordered = [];
@@ -36,8 +34,14 @@ export async function onRequestPost(context) {
   }
 
   data.items = reordered;
-  data.updatedAt = new Date().toISOString();
-  await context.env.ROADMAP_KV.put(KV_KEY, JSON.stringify(data));
+  try {
+    await saveData(context.env, data);
+  } catch (err) {
+    if (err.name === 'ConcurrencyError') {
+      return jsonResponse({ error: 'Another update was in progress. Please retry.' }, 409, corsHeaders());
+    }
+    throw err;
+  }
 
   context.waitUntil(recordEvent(context.env, {
     type: 'item.reordered',

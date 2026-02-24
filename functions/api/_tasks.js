@@ -21,9 +21,16 @@ const SEED_GITHUB_MAPPINGS = {
   'arc0btc': 'bc1qlezz2cgktx0t680ymrytef92wxksywx0jaw933',         // Trustless Indra
 };
 
+export class ConcurrencyError extends Error {
+  constructor() { super('Concurrent write detected'); this.name = 'ConcurrencyError'; }
+}
+
 export async function getData(env) {
   const raw = await env.ROADMAP_KV.get(KV_KEY, 'json');
   const data = raw || { version: 1, items: [] };
+
+  // Initialize writeVersion if missing
+  if (typeof data.writeVersion !== 'number') data.writeVersion = 0;
 
   // Lazy migration: normalize items missing new fields
   if (data.version < 5) {
@@ -86,8 +93,29 @@ export function addContributor(item, agent) {
 }
 
 export async function saveData(env, data) {
+  // Optimistic concurrency: check version hasn't changed since read
+  const expectedVersion = data.writeVersion || 0;
+  const current = await env.ROADMAP_KV.get(KV_KEY, 'json');
+  const currentVersion = current?.writeVersion || 0;
+  if (currentVersion !== expectedVersion) {
+    throw new ConcurrencyError();
+  }
+  data.writeVersion = expectedVersion + 1;
   data.updatedAt = new Date().toISOString();
   await env.ROADMAP_KV.put(KV_KEY, JSON.stringify(data));
+}
+
+// Best-effort save for background tasks: on conflict, re-read version and retry once
+async function saveRetry(env, data) {
+  try {
+    await saveData(env, data);
+  } catch (err) {
+    if (err.name !== 'ConcurrencyError') throw err;
+    console.error('[saveRetry] conflict, retrying with fresh version');
+    const fresh = await env.ROADMAP_KV.get('roadmap:items', 'json');
+    data.writeVersion = fresh?.writeVersion || 0;
+    await saveData(env, data);
+  }
 }
 
 export function parseGithubUrl(url) {
@@ -124,7 +152,10 @@ export async function fetchGithubData(url, env) {
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const res = await fetch(endpoint, { headers });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 404) return { _notFound: true };
+      return null;
+    }
 
     const d = await res.json();
 
@@ -190,6 +221,22 @@ export async function refreshStaleGithubData(env) {
     const fresh = await fetchGithubData(item.githubUrl, env);
     if (!fresh) continue;
 
+    // Auto-archive repos that return 404
+    if (fresh._notFound) {
+      const fails = (item.githubData?._notFoundCount || 0) + 1;
+      if (fails >= 3 && item.githubData?.state !== 'archived') {
+        item.githubData = { ...item.githubData, state: 'archived', _notFoundCount: fails, fetchedAt: new Date().toISOString() };
+        item.updatedAt = new Date().toISOString();
+        changed = true;
+        autoCompleteEvents.push({ itemId: item.id, itemTitle: item.title, oldStatus: deriveStatus(item), newStatus: 'done' });
+        console.error('[refreshStaleGithubData] auto-archived', item.githubUrl, 'after', fails, '404s');
+      } else {
+        item.githubData = { ...item.githubData, _notFoundCount: fails, fetchedAt: new Date().toISOString() };
+        changed = true;
+      }
+      continue;
+    }
+
     // Track status transitions from GitHub state changes
     const oldStatus = deriveStatus(item);
     item.githubData = fresh;
@@ -203,7 +250,7 @@ export async function refreshStaleGithubData(env) {
   }
 
   if (changed) {
-    await saveData(env, data);
+    await saveRetry(env, data);
     for (const ev of autoCompleteEvents) {
       await recordEvent(env, {
         type: 'item.status_synced',
@@ -405,7 +452,7 @@ export async function scanForMentions(env, { reset = false } = {}) {
 
   // Save updated mention counts
   if (changed) {
-    await saveData(env, data);
+    await saveRetry(env, data);
   }
 
   // Record mention events in the activity feed (skip on reset to avoid duplicates
@@ -604,11 +651,16 @@ export async function scanGithubContributors(env) {
   for (const item of data.items) {
     const parsed = parseGithubUrl(item.githubUrl);
     if (!parsed || parsed.type !== 'repo') continue;
+    if (item.githubData?.state === 'archived') continue; // skip dead repos
 
     const repoPath = `${parsed.owner}/${parsed.repo}`;
     const repoState = scanState.repos[repoPath] || {};
     const lastScan = repoState.contributors ? new Date(repoState.contributors).getTime() : 0;
-    if (now - lastScan < GITHUB_SCAN_COOLDOWN_MS) continue;
+    // Back off: after 3+ consecutive failures, wait 1 hour instead of 15 minutes
+    const cooldown = (repoState.contributorFails || 0) >= 3
+      ? 60 * 60 * 1000
+      : GITHUB_SCAN_COOLDOWN_MS;
+    if (now - lastScan < cooldown) continue;
 
     try {
       const res = await fetch(`https://api.github.com/repos/${repoPath}/contributors?per_page=30`, {
@@ -616,11 +668,13 @@ export async function scanGithubContributors(env) {
       });
       if (!res.ok) {
         errors.push(`${repoPath}: HTTP ${res.status}`);
+        scanState.repos[repoPath] = { ...repoState, contributors: new Date().toISOString(), contributorFails: (repoState.contributorFails || 0) + 1 };
         continue;
       }
       const contributors = await res.json();
       if (!Array.isArray(contributors)) {
         errors.push(`${repoPath}: non-array response`);
+        scanState.repos[repoPath] = { ...repoState, contributors: new Date().toISOString(), contributorFails: (repoState.contributorFails || 0) + 1 };
         continue;
       }
 
@@ -639,14 +693,15 @@ export async function scanGithubContributors(env) {
         }
       }
 
-      scanState.repos[repoPath] = { ...repoState, contributors: new Date().toISOString() };
+      scanState.repos[repoPath] = { ...repoState, contributors: new Date().toISOString(), contributorFails: 0 };
       scannedRepos.push(repoPath);
     } catch (err) {
       errors.push(`${repoPath}: ${err.message}`);
+      scanState.repos[repoPath] = { ...repoState, contributors: new Date().toISOString(), contributorFails: (repoState.contributorFails || 0) + 1 };
     }
   }
 
-  if (changed) await saveData(env, data);
+  if (changed) await saveRetry(env, data);
   await env.ROADMAP_KV.put(GITHUB_SCAN_KEY, JSON.stringify(scanState));
 
   return { scannedRepos: scannedRepos.length, newContributors, unmappedUsers, errors };
@@ -668,11 +723,16 @@ export async function scanGithubEvents(env) {
   for (const item of data.items) {
     const parsed = parseGithubUrl(item.githubUrl);
     if (!parsed || parsed.type !== 'repo') continue;
+    if (item.githubData?.state === 'archived') continue; // skip dead repos
 
     const repoPath = `${parsed.owner}/${parsed.repo}`;
     const repoState = scanState.repos[repoPath] || {};
     const lastScan = repoState.events ? new Date(repoState.events).getTime() : 0;
-    if (now - lastScan < GITHUB_SCAN_COOLDOWN_MS) continue;
+    // Back off: after 3+ consecutive failures, wait 1 hour instead of 15 minutes
+    const cooldown = (repoState.eventFails || 0) >= 3
+      ? 60 * 60 * 1000
+      : GITHUB_SCAN_COOLDOWN_MS;
+    if (now - lastScan < cooldown) continue;
 
     try {
       const res = await fetch(
@@ -681,6 +741,7 @@ export async function scanGithubEvents(env) {
       );
       if (!res.ok) {
         errors.push(`${repoPath}: HTTP ${res.status}`);
+        scanState.repos[repoPath] = { ...repoState, events: new Date().toISOString(), eventFails: (repoState.eventFails || 0) + 1 };
         continue;
       }
       const pulls = await res.json();
@@ -726,14 +787,15 @@ export async function scanGithubEvents(env) {
         });
       }
 
-      scanState.repos[repoPath] = { ...repoState, events: new Date().toISOString() };
+      scanState.repos[repoPath] = { ...repoState, events: new Date().toISOString(), eventFails: 0 };
       scannedRepos.push(repoPath);
     } catch (err) {
       errors.push(`${repoPath}: ${err.message}`);
+      scanState.repos[repoPath] = { ...repoState, events: new Date().toISOString(), eventFails: (repoState.eventFails || 0) + 1 };
     }
   }
 
-  if (changed) await saveData(env, data);
+  if (changed) await saveRetry(env, data);
   await env.ROADMAP_KV.put(GITHUB_SCAN_KEY, JSON.stringify(scanState));
 
   return { scannedRepos: scannedRepos.length, newDeliverables, newContributors, errors };

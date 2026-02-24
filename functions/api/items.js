@@ -1,8 +1,15 @@
 import { getAgent, jsonResponse, corsHeaders, recordEvent } from './_auth.js';
-import { getData, saveData, addContributor, parseGithubUrl, fetchGithubData, deriveStatus, refreshStaleGithubData, scanForMentions } from './_tasks.js';
+import { getData, saveData, ConcurrencyError, addContributor, parseGithubUrl, fetchGithubData, deriveStatus, refreshStaleGithubData, scanForMentions } from './_tasks.js';
 
 function generateId() {
   return 'r_' + crypto.randomUUID().slice(0, 8);
+}
+
+function handleConcurrencyError(err) {
+  if (err.name === 'ConcurrencyError') {
+    return jsonResponse({ error: 'Another update was in progress. Please retry.' }, 409, corsHeaders());
+  }
+  throw err;
 }
 
 function computeReputation(ratings) {
@@ -43,6 +50,9 @@ export async function onRequestGet(context) {
 
 // POST - add a new item (AIBTC agent auth required)
 export async function onRequestPost(context) {
+  try { return await _handlePost(context); } catch (err) { return handleConcurrencyError(err); }
+}
+async function _handlePost(context) {
   const agent = await getAgent(context.request, context.env);
   if (!agent) {
     return jsonResponse({ error: 'Not authenticated. Use header: Authorization: AIBTC {btcAddress}' }, 401, corsHeaders());
@@ -59,7 +69,7 @@ export async function onRequestPost(context) {
     return jsonResponse({ error: 'githubUrl is required. Provide a link to an open source GitHub repo.' }, 400, corsHeaders());
   }
   const ghUrl = body.githubUrl.trim();
-  if (!ghUrl.match(/^https?:\/\/(www\.)?github\.com\//)) {
+  if (!ghUrl.match(/^https?:\/\/(www\.)?github\.com\/[^/]+\/[^/]+/)) {
     return jsonResponse({ error: 'githubUrl must be a valid GitHub URL.' }, 400, corsHeaders());
   }
 
@@ -130,6 +140,9 @@ export async function onRequestPost(context) {
 
 // PUT - update an item (AIBTC agent auth required)
 export async function onRequestPut(context) {
+  try { return await _handlePut(context); } catch (err) { return handleConcurrencyError(err); }
+}
+async function _handlePut(context) {
   const agent = await getAgent(context.request, context.env);
   if (!agent) {
     return jsonResponse({ error: 'Not authenticated. Use header: Authorization: AIBTC {btcAddress}' }, 401, corsHeaders());
@@ -485,6 +498,9 @@ export async function onRequestPut(context) {
 
 // DELETE - remove an item (AIBTC agent auth required)
 export async function onRequestDelete(context) {
+  try { return await _handleDelete(context); } catch (err) { return handleConcurrencyError(err); }
+}
+async function _handleDelete(context) {
   const agent = await getAgent(context.request, context.env);
   if (!agent) {
     return jsonResponse({ error: 'Not authenticated. Use header: Authorization: AIBTC {btcAddress}' }, 401, corsHeaders());
