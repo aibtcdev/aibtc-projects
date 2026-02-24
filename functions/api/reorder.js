@@ -12,7 +12,10 @@ export async function onRequestPost(context) {
     return jsonResponse({ error: 'Not authenticated. Use header: Authorization: AIBTC {btcAddress}' }, 401, corsHeaders());
   }
 
-  const body = await context.request.json();
+  let body;
+  try { body = await context.request.json(); } catch {
+    return jsonResponse({ error: 'Invalid JSON in request body' }, 400, corsHeaders());
+  }
   if (!Array.isArray(body.orderedIds)) {
     return jsonResponse({ error: 'orderedIds array is required' }, 400, corsHeaders());
   }

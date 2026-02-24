@@ -1,124 +1,8 @@
 import { getAgent, jsonResponse, corsHeaders, recordEvent } from './_auth.js';
-
-const KV_KEY = 'roadmap:items';
-
-async function getData(env) {
-  const raw = await env.ROADMAP_KV.get(KV_KEY, 'json');
-  const data = raw || { version: 1, items: [] };
-
-  // Lazy migration: normalize items missing new fields
-  if (data.version < 5) {
-    for (const item of data.items) {
-      if (item.claimedBy === undefined) item.claimedBy = null;
-      if (!Array.isArray(item.deliverables)) item.deliverables = [];
-      if (!Array.isArray(item.ratings)) item.ratings = [];
-      if (!item.reputation) item.reputation = { average: 0, count: 0 };
-      if (!Array.isArray(item.goals)) item.goals = [];
-      if (!item.mentions) item.mentions = { count: 0 };
-    }
-    data.version = 5;
-  }
-
-  // v5→v6: add explicit leader field
-  if (data.version < 6) {
-    for (const item of data.items) {
-      if (!item.leader) {
-        const source = item.claimedBy || item.founder;
-        if (source) {
-          item.leader = {
-            btcAddress: source.btcAddress,
-            displayName: source.displayName,
-            agentId: source.agentId,
-            profileUrl: source.profileUrl || `https://aibtc.com/agents/${source.btcAddress}`,
-            assignedAt: source.claimedAt || item.createdAt || new Date().toISOString(),
-            lastActiveAt: item.updatedAt || item.createdAt || new Date().toISOString(),
-          };
-        } else {
-          item.leader = null;
-        }
-      }
-    }
-    data.version = 6;
-  }
-
-  return data;
-}
-
-async function saveData(env, data) {
-  data.updatedAt = new Date().toISOString();
-  await env.ROADMAP_KV.put(KV_KEY, JSON.stringify(data));
-}
+import { getData, saveData, addContributor, parseGithubUrl, fetchGithubData, deriveStatus, refreshStaleGithubData, scanForMentions } from './_tasks.js';
 
 function generateId() {
   return 'r_' + crypto.randomUUID().slice(0, 8);
-}
-
-function parseGithubUrl(url) {
-  if (!url) return null;
-  // Match issue or PR
-  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/(issues|pull)\/(\d+)/);
-  if (m) return { owner: m[1], repo: m[2], type: m[3] === 'pull' ? 'pr' : 'issue', number: parseInt(m[4]) };
-  // Match repo URL (e.g. github.com/org/repo)
-  const r = url.match(/github\.com\/([^/]+)\/([^/?#]+)/);
-  if (r) return { owner: r[1], repo: r[2], type: 'repo', number: null };
-  return null;
-}
-
-async function fetchGithubData(url, env) {
-  try {
-    const parsed = parseGithubUrl(url);
-    if (!parsed) return null;
-
-    let endpoint;
-    if (parsed.type === 'repo') {
-      endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}`;
-    } else if (parsed.type === 'pr') {
-      endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`;
-    } else {
-      endpoint = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/issues/${parsed.number}`;
-    }
-
-    const headers = {
-      'User-Agent': 'aibtc-projects/1.0',
-      Accept: 'application/vnd.github+json',
-    };
-    // Use GitHub token if available (avoids 403 from shared Cloudflare IPs)
-    const token = env?.GITHUB_TOKEN;
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-
-    const res = await fetch(endpoint, { headers });
-    if (!res.ok) return null;
-
-    const d = await res.json();
-
-    if (parsed.type === 'repo') {
-      return {
-        type: 'repo',
-        number: null,
-        title: d.description || d.full_name,
-        state: d.archived ? 'archived' : 'active',
-        merged: false,
-        assignees: [],
-        labels: d.topics || [],
-        stars: d.stargazers_count,
-        homepage: d.homepage || null,
-        fetchedAt: new Date().toISOString(),
-      };
-    }
-
-    return {
-      type: parsed.type,
-      number: parsed.number,
-      title: d.title,
-      state: d.state,
-      merged: d.merged || false,
-      assignees: (d.assignees || []).map(a => a.login),
-      labels: (d.labels || []).map(l => l.name),
-      fetchedAt: new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
 }
 
 function computeReputation(ratings) {
@@ -127,18 +11,7 @@ function computeReputation(ratings) {
   return { average: Math.round((sum / ratings.length) * 10) / 10, count: ratings.length };
 }
 
-// Add agent to contributors list if not already present
-function addContributor(item, agent) {
-  if (!item.contributors) item.contributors = [];
-  const exists = item.contributors.some(c => c.btcAddress === agent.btcAddress);
-  if (!exists) {
-    item.contributors.push({
-      btcAddress: agent.btcAddress,
-      displayName: agent.displayName,
-      agentId: agent.agentId,
-    });
-  }
-}
+// addContributor is imported from _tasks.js (shared module)
 
 // Bump leader.lastActiveAt if the acting agent is the leader
 function bumpLeaderActivity(item, agent) {
@@ -147,176 +20,9 @@ function bumpLeaderActivity(item, agent) {
   }
 }
 
-// Derive status from GitHub state — single source of truth
-function deriveStatus(item) {
-  const gd = item.githubData;
-  if (!gd || !gd.type) return 'todo';
-  if (gd.type === 'repo') return gd.state === 'archived' ? 'done' : 'in-progress';
-  if (gd.type === 'pr') {
-    if (gd.merged) return 'done';
-    if (gd.state === 'closed') return 'blocked';
-    return 'in-progress';
-  }
-  // issue
-  return gd.state === 'closed' ? 'done' : 'in-progress';
-}
-
 // OPTIONS - CORS preflight
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: corsHeaders() });
-}
-
-// Refresh stale GitHub data in the background
-const STALE_AFTER_MS = 60 * 60 * 1000; // 1 hour
-
-async function refreshStaleGithubData(env) {
-  const data = await getData(env);
-  const now = Date.now();
-  let changed = false;
-  const autoCompleteEvents = [];
-
-  for (const item of data.items) {
-    if (!item.githubUrl) continue;
-    const fetchedAt = item.githubData?.fetchedAt ? new Date(item.githubData.fetchedAt).getTime() : 0;
-    if (now - fetchedAt < STALE_AFTER_MS) continue;
-
-    const fresh = await fetchGithubData(item.githubUrl, env);
-    if (!fresh) continue;
-
-    // Track status transitions from GitHub state changes
-    const oldStatus = deriveStatus(item);
-    item.githubData = fresh;
-    const newStatus = deriveStatus(item);
-    if (oldStatus !== newStatus) {
-      autoCompleteEvents.push({ itemId: item.id, itemTitle: item.title, oldStatus, newStatus });
-    }
-    item.updatedAt = new Date().toISOString();
-    changed = true;
-  }
-
-  if (changed) {
-    await saveData(env, data);
-    for (const ev of autoCompleteEvents) {
-      await recordEvent(env, {
-        type: 'item.status_synced',
-        agent: null,
-        itemId: ev.itemId,
-        itemTitle: ev.itemTitle,
-        data: { oldStatus: ev.oldStatus, newStatus: ev.newStatus, reason: 'github_state' },
-      });
-    }
-  }
-}
-
-// ── Mention Scanning ──
-const MENTION_SCAN_KEY = 'roadmap:mention-scan';
-const MENTION_SCAN_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
-
-async function scanForMentions(env) {
-  // Check cooldown to avoid scanning on every request
-  const scanMeta = await env.ROADMAP_KV.get(MENTION_SCAN_KEY, 'json');
-  const lastScan = scanMeta?.lastScanAt ? new Date(scanMeta.lastScanAt).getTime() : 0;
-  if (Date.now() - lastScan < MENTION_SCAN_COOLDOWN_MS) return;
-
-  const processedIds = new Set(scanMeta?.processedIds || []);
-
-  // Fetch AIBTC network activity
-  let activityEvents;
-  try {
-    const res = await fetch('https://aibtc.com/api/activity', {
-      headers: { 'User-Agent': 'aibtc-projects/1.0' },
-    });
-    if (!res.ok) return;
-    const body = await res.json();
-    activityEvents = body.events || [];
-  } catch {
-    return;
-  }
-
-  if (activityEvents.length === 0) return;
-
-  // Filter to unprocessed message events that have preview text
-  const newEvents = activityEvents.filter(e =>
-    e.type === 'message' && e.messagePreview && !processedIds.has(e.timestamp)
-  );
-
-  if (newEvents.length === 0) {
-    // Update scan time even if no new events
-    await env.ROADMAP_KV.put(MENTION_SCAN_KEY, JSON.stringify({
-      lastScanAt: new Date().toISOString(),
-      processedIds: [...processedIds].slice(-500),
-    }));
-    return;
-  }
-
-  const data = await getData(env);
-  let changed = false;
-  const mentionEvents = [];
-
-  for (const ev of newEvents) {
-    const preview = (ev.messagePreview || '').toLowerCase();
-    processedIds.add(ev.timestamp);
-
-    for (const item of data.items) {
-      // Match against title (case-insensitive)
-      const titleLower = item.title ? item.title.toLowerCase() : '';
-      const titleMatch = titleLower && preview.includes(titleLower);
-      // Also match slugified title (e.g. "AIBTC Projects" → "aibtc-projects")
-      const titleSlug = titleLower.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-      const slugMatch = titleSlug.length > 3 && preview.includes(titleSlug);
-      // Match against GitHub URL, repo path, or repo name
-      const ghPath = item.githubUrl ? item.githubUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\/$/, '').toLowerCase() : null;
-      const ghRepoName = ghPath ? ghPath.split('/').pop() : null;
-      const urlMatch = ghPath && (
-        preview.includes(item.githubUrl.toLowerCase()) ||
-        preview.includes(ghPath) ||
-        (ghRepoName && ghRepoName.length > 3 && preview.includes(ghRepoName))
-      );
-      // Match against website hostname if present
-      const homepage = item.githubData?.homepage;
-      let siteMatch = false;
-      if (homepage) {
-        try {
-          const host = new URL(homepage).hostname.toLowerCase();
-          siteMatch = preview.includes(host);
-        } catch {}
-      }
-
-      if (titleMatch || slugMatch || urlMatch || siteMatch) {
-        if (!item.mentions) item.mentions = { count: 0 };
-        item.mentions.count += 1;
-        changed = true;
-        mentionEvents.push({
-          itemId: item.id,
-          itemTitle: item.title,
-          agent: ev.agent || null,
-          matchType: titleMatch ? 'title' : slugMatch ? 'slug' : urlMatch ? 'url' : 'site',
-        });
-      }
-    }
-  }
-
-  // Save updated mention counts
-  if (changed) {
-    await saveData(env, data);
-  }
-
-  // Record mention events
-  for (const me of mentionEvents) {
-    await recordEvent(env, {
-      type: 'item.mentioned',
-      agent: me.agent ? { btcAddress: me.agent.btcAddress, displayName: me.agent.displayName, agentId: null } : null,
-      itemId: me.itemId,
-      itemTitle: me.itemTitle,
-      data: { matchType: me.matchType },
-    });
-  }
-
-  // Save scan metadata
-  await env.ROADMAP_KV.put(MENTION_SCAN_KEY, JSON.stringify({
-    lastScanAt: new Date().toISOString(),
-    processedIds: [...processedIds].slice(-500),
-  }));
 }
 
 // GET - list all items (public, no auth)
@@ -342,7 +48,10 @@ export async function onRequestPost(context) {
     return jsonResponse({ error: 'Not authenticated. Use header: Authorization: AIBTC {btcAddress}' }, 401, corsHeaders());
   }
 
-  const body = await context.request.json();
+  let body;
+  try { body = await context.request.json(); } catch {
+    return jsonResponse({ error: 'Invalid JSON in request body' }, 400, corsHeaders());
+  }
   if (!body.title || !body.title.trim()) {
     return jsonResponse({ error: 'Title is required' }, 400, corsHeaders());
   }
@@ -426,7 +135,10 @@ export async function onRequestPut(context) {
     return jsonResponse({ error: 'Not authenticated. Use header: Authorization: AIBTC {btcAddress}' }, 401, corsHeaders());
   }
 
-  const body = await context.request.json();
+  let body;
+  try { body = await context.request.json(); } catch {
+    return jsonResponse({ error: 'Invalid JSON in request body' }, 400, corsHeaders());
+  }
   if (!body.id) return jsonResponse({ error: 'Item id is required' }, 400, corsHeaders());
 
   const data = await getData(context.env);
@@ -579,7 +291,12 @@ export async function onRequestPut(context) {
       addedAt: new Date().toISOString(),
       completedAt: null,
     };
-    item.goals.push(goal);
+    // Single active benchmark: move old goals to history, replace with new
+    if (item.goals.length > 0) {
+      if (!Array.isArray(item.goalHistory)) item.goalHistory = [];
+      item.goalHistory.push(...item.goals);
+    }
+    item.goals = [goal];
     addContributor(item, agent);
     bumpLeaderActivity(item, agent);
     item.updatedAt = new Date().toISOString();
@@ -721,6 +438,9 @@ export async function onRequestPut(context) {
 
   if (body.title !== undefined) item.title = body.title.trim();
   if (body.description !== undefined) item.description = body.description.trim();
+  if (Array.isArray(body.searchTerms)) {
+    item.searchTerms = body.searchTerms.map(t => t.toLowerCase().trim()).filter(t => t.length > 2);
+  }
 
   if (body.githubUrl !== undefined) {
     item.githubUrl = body.githubUrl.trim();
@@ -770,7 +490,10 @@ export async function onRequestDelete(context) {
     return jsonResponse({ error: 'Not authenticated. Use header: Authorization: AIBTC {btcAddress}' }, 401, corsHeaders());
   }
 
-  const body = await context.request.json();
+  let body;
+  try { body = await context.request.json(); } catch {
+    return jsonResponse({ error: 'Invalid JSON in request body' }, 400, corsHeaders());
+  }
   if (!body.id) return jsonResponse({ error: 'Item id is required' }, 400, corsHeaders());
 
   const data = await getData(context.env);

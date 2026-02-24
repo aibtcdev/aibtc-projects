@@ -1,0 +1,20 @@
+name: Refresh Data
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Trigger refresh
+        run: |
+          response=$(curl -sf "https://aibtc-projects.pages.dev/api/refresh?key=$REFRESH_KEY" \
+            -H "User-Agent: github-actions-refresh" \
+            --max-time 90 2>&1) || true
+          echo "$response"
+        env:
+          REFRESH_KEY: ${{ secrets.REFRESH_KEY }}

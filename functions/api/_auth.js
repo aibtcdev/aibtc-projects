@@ -41,7 +41,8 @@ export async function getAgent(request, env) {
     await env.ROADMAP_KV.put(cacheKey, JSON.stringify(agent), { expirationTtl: CACHE_TTL });
 
     return agent;
-  } catch {
+  } catch (err) {
+    console.error('[getAgent] verification failed for', address, err);
     return null;
   }
 }
