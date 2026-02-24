@@ -75,6 +75,30 @@ export async function getData(env) {
     data.version = 7;
   }
 
+  // v7→v8: add website field
+  if (data.version < 8) {
+    for (const item of data.items) {
+      if (item.website === undefined) {
+        if (item.githubData?.homepage) {
+          item.website = { url: item.githubData.homepage, source: 'homepage', discoveredAt: new Date().toISOString() };
+        } else {
+          item.website = null;
+        }
+      }
+    }
+    data.version = 8;
+  }
+
+  // v8→v9: re-discover websites with improved filtering (bump to v10 for second pass)
+  if (data.version < 10) {
+    for (const item of data.items) {
+      if (item.website && item.website.source !== 'homepage') {
+        item.website = null; // will be re-discovered by discoverWebsites()
+      }
+    }
+    data.version = 10;
+  }
+
   return data;
 }
 
@@ -347,6 +371,128 @@ export function matchMention(preview, item) {
     if (preview.includes(term.text)) return term.type;
   }
   return null;
+}
+
+// ── Website URL Discovery Utilities ──
+
+const NOISE_HOSTS = new Set([
+  'github.com', 'www.github.com', 'docs.github.com',
+  'raw.githubusercontent.com', 'user-images.githubusercontent.com',
+  'avatars.githubusercontent.com', 'camo.githubusercontent.com',
+  'npmjs.com', 'www.npmjs.com',
+  'shields.io', 'img.shields.io', 'badge.fury.io',
+  'coveralls.io', 'codecov.io',
+  'travis-ci.org', 'travis-ci.com', 'circleci.com',
+  'david-dm.org', 'gitter.im',
+  'localhost', 'example.com',
+  'crates.io', 'pypi.org', 'rubygems.org',
+  'bun.sh', 'bun.com', 'deno.land', 'deno.com', 'nodejs.org',
+]);
+
+// URL path patterns that indicate non-deployment pages (profiles, docs, etc.)
+const NOISE_PATHS = [
+  /^\/agents\//,   // aibtc.com agent profile links
+  /^\/api\//,      // API endpoints
+  /^\/install\b/,  // install scripts (e.g. curl ... | sh)
+  /^\/raw\//,      // raw file endpoints
+];
+
+// URLs that belong to this application itself (project board) — excluded from
+// deliverable/message sources but allowed in README/description/homepage sources
+const SELF_HOSTS = new Set(['aibtc-projects.pages.dev']);
+
+function isDeploymentUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (NOISE_HOSTS.has(host)) return 0;
+    // Filter out known non-deployment URL patterns
+    if (NOISE_PATHS.some(p => p.test(parsed.pathname))) return 0;
+    if (host.endsWith('.pages.dev')) return 10;
+    if (host.endsWith('.vercel.app')) return 10;
+    if (host.endsWith('.netlify.app')) return 10;
+    if (host.endsWith('.workers.dev')) return 9;
+    if (host.endsWith('.herokuapp.com')) return 8;
+    if (host.endsWith('.fly.dev')) return 8;
+    if (host.endsWith('.web.app') || host.endsWith('.firebaseapp.com')) return 8;
+    if (host.endsWith('.onrender.com')) return 8;
+    if (host.endsWith('.surge.sh')) return 7;
+    if (host.endsWith('.github.io')) return 7;
+    // Custom domains (not a known noise host)
+    if (!host.includes('github') && !host.includes('npm')) return 6;
+    return 0;
+  } catch { return 0; }
+}
+
+function extractUrlsFromText(text) {
+  if (!text) return [];
+  const matches = text.match(/https?:\/\/[^\s<>\[\]()'"`,;]+/gi) || [];
+  return matches.map(u => u.replace(/[.)]+$/, ''));
+}
+
+const URL_CONTEXT_KEYWORDS = /\b(live|demo|website|deployed|homepage|visit|hosted|app|try it|production|dashboard)\b/i;
+const URL_NEGATIVE_KEYWORDS = /\b(built by|created by|credits|author|maintained by|made by|powered by)\b/i;
+
+function extractUrlFromReadme(content, skipUrls = new Set()) {
+  if (!content) return null;
+  const urls = extractUrlsFromText(content);
+  if (urls.length === 0) return null;
+
+  const scored = urls
+    .map(url => ({ url, score: isDeploymentUrl(url) }))
+    .filter(u => u.score > 0 && !skipUrls.has(u.url));
+  if (scored.length === 0) return null;
+
+  // Bonus for URLs near contextual keywords, penalty near credits/author sections
+  for (const s of scored) {
+    const idx = content.indexOf(s.url);
+    if (idx !== -1) {
+      const ctx = content.slice(Math.max(0, idx - 200), idx);
+      if (URL_CONTEXT_KEYWORDS.test(ctx)) s.score += 5;
+      if (URL_NEGATIVE_KEYWORDS.test(ctx)) s.score -= 4;
+    }
+  }
+
+  // Require minimum score of 5 (custom domain=6 minus any penalty must still qualify)
+  const best = scored.filter(s => s.score >= 5).sort((a, b) => b.score - a.score);
+  return best.length > 0 ? best[0].url : null;
+}
+
+function extractUrlFromDescription(description, skipUrls = new Set()) {
+  if (!description) return null;
+  const urls = extractUrlsFromText(description);
+  const scored = urls
+    .map(url => ({ url, score: isDeploymentUrl(url) }))
+    .filter(u => u.score > 0 && !skipUrls.has(u.url));
+  if (scored.length === 0) return null;
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].url;
+}
+
+function extractUrlFromMessages(messages, item) {
+  if (!messages || messages.length === 0) return null;
+  const urlCounts = new Map();
+
+  for (const msg of messages) {
+    const preview = (msg.messagePreview || '').toLowerCase();
+    if (!matchMention(preview, item)) continue;
+    const urls = extractUrlsFromText(msg.messagePreview || '');
+    for (const url of urls) {
+      if (isDeploymentUrl(url) === 0) continue;
+      try { if (SELF_HOSTS.has(new URL(url).hostname.toLowerCase())) continue; } catch {}
+      urlCounts.set(url, (urlCounts.get(url) || 0) + 1);
+    }
+  }
+
+  if (urlCounts.size === 0) return null;
+  let best = null, bestCount = 0;
+  for (const [url, count] of urlCounts) {
+    if (count > bestCount || (count === bestCount && isDeploymentUrl(url) > isDeploymentUrl(best))) {
+      best = url;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 // ── Mention Scanning ──
@@ -799,4 +945,147 @@ export async function scanGithubEvents(env) {
   await env.ROADMAP_KV.put(GITHUB_SCAN_KEY, JSON.stringify(scanState));
 
   return { scannedRepos: scannedRepos.length, newDeliverables, newContributors, errors };
+}
+
+// ── Website URL Discovery ──
+
+const WEBSITE_SCAN_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+export async function discoverWebsites(env) {
+  const scanState = await env.ROADMAP_KV.get(GITHUB_SCAN_KEY, 'json') || { version: 1, repos: {} };
+
+  // One-time: reset website scan cooldowns when filter rules change
+  if (!scanState.websiteFilterVersion || scanState.websiteFilterVersion < 5) {
+    for (const rp of Object.keys(scanState.repos)) {
+      delete scanState.repos[rp].website;
+      delete scanState.repos[rp].websiteFails;
+    }
+    scanState.websiteFilterVersion = 5;
+  }
+
+  const data = await getData(env);
+  const now = Date.now();
+  let changed = false;
+  let discovered = 0;
+  const scannedRepos = [];
+  const errors = [];
+  let archivedMessages = null; // lazy-load
+
+  // Build set of already-claimed website URLs to prevent cross-project conflicts
+  const claimedUrls = new Set();
+  for (const it of data.items) {
+    if (it.website?.url) claimedUrls.add(it.website.url);
+  }
+
+  for (const item of data.items) {
+    // If homepage source, keep in sync with githubData.homepage
+    if (item.website?.source === 'homepage' && item.githubData?.homepage && item.website.url !== item.githubData.homepage) {
+      item.website.url = item.githubData.homepage;
+      item.website.discoveredAt = new Date().toISOString();
+      changed = true;
+    }
+    // Re-evaluate existing websites that now fail the noise filter or are claimed by another project
+    const shouldClear = item.website && (
+      isDeploymentUrl(item.website.url) === 0 ||
+      // Clear non-homepage sources if another item already has a homepage claim on this URL
+      (item.website.source !== 'homepage' && [...data.items].some(
+        other => other !== item && other.website?.url === item.website.url && other.website?.source === 'homepage'
+      ))
+    );
+    if (shouldClear) {
+      claimedUrls.delete(item.website.url);
+      item.website = null;
+      changed = true;
+      // Reset scan cooldown so this repo gets re-scanned immediately
+      const p = parseGithubUrl(item.githubUrl);
+      if (p) {
+        const rp = `${p.owner}/${p.repo}`;
+        if (scanState.repos[rp]) delete scanState.repos[rp].website;
+      }
+      // fall through to re-discover below
+    }
+    // Skip if already discovered
+    if (item.website) continue;
+
+    const parsed = parseGithubUrl(item.githubUrl);
+    if (!parsed || parsed.type !== 'repo') continue;
+    if (item.githubData?.state === 'archived') continue;
+
+    const repoPath = `${parsed.owner}/${parsed.repo}`;
+    const repoState = scanState.repos[repoPath] || {};
+    const lastScan = repoState.website ? new Date(repoState.website).getTime() : 0;
+    const cooldown = (repoState.websiteFails || 0) >= 3 ? 6 * 60 * 60 * 1000 : WEBSITE_SCAN_COOLDOWN_MS;
+    if (now - lastScan < cooldown) continue;
+
+    let url = null;
+    let source = null;
+
+    // Priority 1: GitHub homepage
+    if (item.githubData?.homepage && isDeploymentUrl(item.githubData.homepage) > 0) {
+      url = item.githubData.homepage;
+      source = 'homepage';
+    }
+
+    // Priority 2: GitHub description
+    if (!url) {
+      const descUrl = extractUrlFromDescription(item.githubData?.title, claimedUrls);
+      if (descUrl) { url = descUrl; source = 'description'; }
+    }
+
+    // Priority 3: README (API call)
+    if (!url) {
+      try {
+        const res = await fetch(`https://api.github.com/repos/${repoPath}/readme`, {
+          headers: { ...githubHeaders(env), Accept: 'application/vnd.github.raw+json' },
+        });
+        if (res.ok) {
+          const readmeText = await res.text();
+          const readmeUrl = extractUrlFromReadme(readmeText, claimedUrls);
+          if (readmeUrl) { url = readmeUrl; source = 'readme'; }
+        }
+      } catch (err) {
+        console.error('[discoverWebsites] README fetch failed', repoPath, err);
+        errors.push(`${repoPath}: README fetch failed`);
+        scanState.repos[repoPath] = { ...repoState, website: new Date().toISOString(), websiteFails: (repoState.websiteFails || 0) + 1 };
+        continue;
+      }
+    }
+
+    // Priority 4: Deliverable URLs (skip self-referencing board URLs)
+    if (!url) {
+      for (const d of (item.deliverables || [])) {
+        if (!d.url || isDeploymentUrl(d.url) === 0) continue;
+        try { if (SELF_HOSTS.has(new URL(d.url).hostname.toLowerCase())) continue; } catch {}
+        url = d.url; source = 'deliverable'; break;
+      }
+    }
+
+    // Priority 5: Message archive
+    if (!url) {
+      if (archivedMessages === null) {
+        archivedMessages = await getArchivedMessages(env);
+      }
+      const msgUrl = extractUrlFromMessages(archivedMessages, item);
+      if (msgUrl) { url = msgUrl; source = 'message'; }
+    }
+
+    // Skip if URL is already claimed by another project (avoid cross-project conflicts)
+    if (url && claimedUrls.has(url)) url = null;
+
+    if (url) {
+      item.website = { url, source, discoveredAt: new Date().toISOString() };
+      item.updatedAt = new Date().toISOString();
+      claimedUrls.add(url);
+      changed = true;
+      discovered++;
+    }
+
+    scanState.repos[repoPath] = { ...repoState, website: new Date().toISOString(), websiteFails: 0 };
+    scannedRepos.push(repoPath);
+  }
+
+  if (changed) await saveRetry(env, data);
+  await env.ROADMAP_KV.put(GITHUB_SCAN_KEY, JSON.stringify(scanState));
+
+  return { scannedRepos: scannedRepos.length, discovered, errors };
 }

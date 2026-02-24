@@ -2,7 +2,7 @@
 // Called by GitHub Actions cron every 15 minutes.
 
 import { jsonResponse, corsHeaders } from './_auth.js';
-import { refreshStaleGithubData, scanForMentions, backfillMentions, scanGithubContributors, scanGithubEvents } from './_tasks.js';
+import { refreshStaleGithubData, scanForMentions, backfillMentions, scanGithubContributors, scanGithubEvents, discoverWebsites } from './_tasks.js';
 
 export async function onRequestOptions() {
   return new Response(null, { status: 204, headers: corsHeaders() });
@@ -28,6 +28,7 @@ export async function onRequestGet(context) {
   const mentionResult = await scanForMentions(context.env, { reset });
   const contributorResult = await scanGithubContributors(context.env);
   const eventResult = await scanGithubEvents(context.env);
+  const websiteResult = await discoverWebsites(context.env);
 
   // Backfill operates on events KV only (not items), safe to run last
   const backfillResult = await backfillMentions(context.env);
@@ -41,6 +42,7 @@ export async function onRequestGet(context) {
     mentions: mentionResult,
     githubContributors: contributorResult,
     githubEvents: eventResult,
+    websites: websiteResult,
     backfill: backfillResult,
     timestamp: new Date().toISOString(),
   }, 200, corsHeaders());
