@@ -230,14 +230,16 @@ export function deriveStatus(item) {
 }
 
 // Refresh stale GitHub data in the background
-export async function refreshStaleGithubData(env) {
+export async function refreshStaleGithubData(env, { deadline } = {}) {
   const data = await getData(env);
   const now = Date.now();
   let changed = false;
   let refreshedCount = 0;
+  let timedOut = false;
   const autoCompleteEvents = [];
 
   for (const item of data.items) {
+    if (deadline && Date.now() >= deadline) { timedOut = true; break; }
     if (!item.githubUrl) continue;
     const fetchedAt = item.githubData?.fetchedAt ? new Date(item.githubData.fetchedAt).getTime() : 0;
     if (now - fetchedAt < STALE_AFTER_MS) continue;
@@ -286,7 +288,7 @@ export async function refreshStaleGithubData(env) {
     }
   }
 
-  return { refreshedCount, statusChanges: autoCompleteEvents.length };
+  return { refreshedCount, statusChanges: autoCompleteEvents.length, timedOut };
 }
 
 // ── Mention Matching ──
@@ -783,18 +785,20 @@ function githubHeaders(env) {
   return headers;
 }
 
-export async function scanGithubContributors(env) {
+export async function scanGithubContributors(env, { deadline } = {}) {
   const scanState = await env.ROADMAP_KV.get(GITHUB_SCAN_KEY, 'json') || { version: 1, repos: {} };
   const mapping = await getGithubMapping(env);
   const data = await getData(env);
   const now = Date.now();
   let changed = false;
   let newContributors = 0;
+  let timedOut = false;
   const scannedRepos = [];
   const unmappedUsers = [];
   const errors = [];
 
   for (const item of data.items) {
+    if (deadline && Date.now() >= deadline) { timedOut = true; break; }
     const parsed = parseGithubUrl(item.githubUrl);
     if (!parsed || parsed.type !== 'repo') continue;
     if (item.githubData?.state === 'archived') continue; // skip dead repos
@@ -850,12 +854,12 @@ export async function scanGithubContributors(env) {
   if (changed) await saveRetry(env, data);
   await env.ROADMAP_KV.put(GITHUB_SCAN_KEY, JSON.stringify(scanState));
 
-  return { scannedRepos: scannedRepos.length, newContributors, unmappedUsers, errors };
+  return { scannedRepos: scannedRepos.length, newContributors, unmappedUsers, errors, timedOut };
 }
 
 // ── GitHub Event Detection (Merged PRs → Deliverables) ──
 
-export async function scanGithubEvents(env) {
+export async function scanGithubEvents(env, { deadline } = {}) {
   const scanState = await env.ROADMAP_KV.get(GITHUB_SCAN_KEY, 'json') || { version: 1, repos: {} };
   const mapping = await getGithubMapping(env);
   const data = await getData(env);
@@ -863,10 +867,12 @@ export async function scanGithubEvents(env) {
   let changed = false;
   let newDeliverables = 0;
   let newContributors = 0;
+  let timedOut = false;
   const scannedRepos = [];
   const errors = [];
 
   for (const item of data.items) {
+    if (deadline && Date.now() >= deadline) { timedOut = true; break; }
     const parsed = parseGithubUrl(item.githubUrl);
     if (!parsed || parsed.type !== 'repo') continue;
     if (item.githubData?.state === 'archived') continue; // skip dead repos
@@ -944,14 +950,14 @@ export async function scanGithubEvents(env) {
   if (changed) await saveRetry(env, data);
   await env.ROADMAP_KV.put(GITHUB_SCAN_KEY, JSON.stringify(scanState));
 
-  return { scannedRepos: scannedRepos.length, newDeliverables, newContributors, errors };
+  return { scannedRepos: scannedRepos.length, newDeliverables, newContributors, errors, timedOut };
 }
 
 // ── Website URL Discovery ──
 
 const WEBSITE_SCAN_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 
-export async function discoverWebsites(env) {
+export async function discoverWebsites(env, { deadline } = {}) {
   const scanState = await env.ROADMAP_KV.get(GITHUB_SCAN_KEY, 'json') || { version: 1, repos: {} };
 
   // One-time: reset website scan cooldowns when filter rules change
@@ -967,6 +973,7 @@ export async function discoverWebsites(env) {
   const now = Date.now();
   let changed = false;
   let discovered = 0;
+  let timedOut = false;
   const scannedRepos = [];
   const errors = [];
   let archivedMessages = null; // lazy-load
@@ -978,6 +985,7 @@ export async function discoverWebsites(env) {
   }
 
   for (const item of data.items) {
+    if (deadline && Date.now() >= deadline) { timedOut = true; break; }
     // If homepage source, keep in sync with githubData.homepage
     if (item.website?.source === 'homepage' && item.githubData?.homepage && item.website.url !== item.githubData.homepage) {
       item.website.url = item.githubData.homepage;
@@ -1087,5 +1095,5 @@ export async function discoverWebsites(env) {
   if (changed) await saveRetry(env, data);
   await env.ROADMAP_KV.put(GITHUB_SCAN_KEY, JSON.stringify(scanState));
 
-  return { scannedRepos: scannedRepos.length, discovered, errors };
+  return { scannedRepos: scannedRepos.length, discovered, errors, timedOut };
 }

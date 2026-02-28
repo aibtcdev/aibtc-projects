@@ -11,7 +11,7 @@ permissions:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
       - name: Trigger refresh
         id: refresh
@@ -21,7 +21,8 @@ jobs:
             echo "Attempt $attempt..."
             if response=$(curl -sf "https://aibtc-projects.pages.dev/api/refresh?key=$REFRESH_KEY" \
               -H "User-Agent: github-actions-refresh" \
-              --max-time 90 2>&1); then
+              --connect-timeout 10 \
+              --max-time 60 2>&1); then
               success=true
               break
             fi
