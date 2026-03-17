@@ -6,12 +6,13 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   issues: write
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - name: Trigger refresh
         id: refresh
