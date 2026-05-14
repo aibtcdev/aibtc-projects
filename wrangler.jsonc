@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "aibtc-projects",
+  "pages_build_output_dir": ".",
+  "kv_namespaces": [
+    {
+      "binding": "ROADMAP_KV",
+      "id": "f67c1108673448978cc2514973191bdf"
+    }
+  ]
+}
